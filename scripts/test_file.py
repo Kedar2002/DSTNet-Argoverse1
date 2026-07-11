@@ -1,49 +1,31 @@
-from pathlib import Path
+import torch
 
-from datasets.argoverse_dataset import ArgoverseDataset
-from datasets.cache_manager import CacheManager
-from datasets.preprocess import ScenePreprocessor
-from datasets.scene_parser import SceneParser
+from models.layers.mlp import MLP
 
 
 def main():
 
-    parser = SceneParser(None)
-
-    preprocessor = ScenePreprocessor(
-        observation_steps=20,
-        prediction_steps=30,
-        lane_sample_points=20,
-        agent_radius=30.0,
-        lane_radius=20.0,
+    model = MLP(
+        input_dim=16,
+        hidden_dims=[32, 64],
+        output_dim=8,
+        dropout=0.1,
     )
 
-    dataset = ArgoverseDataset(
-        root=Path("data/argoverse1/train"),
-        parser=parser,
-        preprocessor=preprocessor,
-        cache=CacheManager("cache"),
+    x = torch.randn(
+        4,
+        16,
     )
 
-    print(dataset)
+    y = model(x)
 
-    print(dataset.summary())
-
-    print()
-
-    print("Dataset Size")
-
-    print(len(dataset))
+    print(model)
 
     print()
 
-    scene = dataset[0]
+    print(x.shape)
 
-    print(scene)
-
-    print()
-
-    print(scene.summary())
+    print(y.shape)
 
 
 if __name__ == "__main__":
