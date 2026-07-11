@@ -224,10 +224,19 @@ def move_to_device(
 def has_nan_or_inf(tensor: torch.Tensor) -> bool:
     """
     Check whether a tensor contains NaN or Inf values.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+
+    Returns
+    -------
+    bool
+        True if the tensor contains NaN or Inf values.
     """
-    return (
-        torch.isnan(tensor).any()
-        or torch.isinf(tensor).any()
+    return bool(
+        torch.isnan(tensor).any().item()
+        or torch.isinf(tensor).any().item()
     )
 
 
