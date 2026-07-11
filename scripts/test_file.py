@@ -1,20 +1,20 @@
 import torch
 
-from models.layers.mlp import MLP
+from models.layers.feed_forward import FeedForward
 
 
 def main():
 
-    model = MLP(
-        input_dim=16,
-        hidden_dims=[32, 64],
-        output_dim=8,
+    model = FeedForward(
+        hidden_dim=256,
+        expansion=4,
         dropout=0.1,
     )
 
     x = torch.randn(
-        4,
-        16,
+        8,
+        20,
+        256,
     )
 
     y = model(x)
@@ -23,7 +23,13 @@ def main():
 
     print()
 
+    print("Input")
+
     print(x.shape)
+
+    print()
+
+    print("Output")
 
     print(y.shape)
 
