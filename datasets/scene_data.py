@@ -1,33 +1,45 @@
 """
-datasets/scene_data.py
+datasets.scene_data
 
-Tensor representation of one processed Argoverse scene.
+Processed scene representation for DSTNet.
 
+This module defines the canonical data structure exchanged between
+the preprocessing pipeline and the neural network.
+
+Pipeline
+--------
 RawScene
     ↓
-Geometry
-    ↓
-Feature Extraction
-    ↓
-Graph Builder
+ScenePreprocessor
     ↓
 SceneData
+    ↓
+Collate
+    ↓
+DSTNet
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any
 
-import torch
+import numpy as np
 
+from datasets.graph_builder import GraphData
+
+
+###############################################################################
+# SceneData
+###############################################################################
 
 @dataclass(slots=True)
 class SceneData:
     """
-    Processed scene used by the PyTorch Dataset.
+    Fully processed scene.
 
-    Every field is already converted into tensors and normalized.
+    All coordinates are already normalized into the target-agent
+    reference frame.
     """
 
     ###########################################################################
@@ -39,66 +51,33 @@ class SceneData:
     city: str
 
     ###########################################################################
-    # Agent Features
+    # Reference Frame
     ###########################################################################
 
-    agent_features: torch.Tensor
+    origin: np.ndarray
     """
-    Shape:
-        (N_agents, observation_steps, feature_dim)
-    """
-
-    ###########################################################################
-    # Lane Features
-    ###########################################################################
-
-    lane_features: torch.Tensor
-    """
-    Shape:
-        (N_lanes, lane_points, lane_feature_dim)
+    Shape (2,)
     """
 
-    ###########################################################################
-    # Future Target
-    ###########################################################################
-
-    target_future: torch.Tensor
-    """
-    Shape:
-        (prediction_steps, 2)
-    """
+    heading: float
 
     ###########################################################################
-    # Graph Connectivity
+    # Processed Agents
     ###########################################################################
 
-    agent_agent_edge_index: torch.Tensor
-    """
-    Shape:
-        (2, Eaa)
-    """
-
-    lane_agent_edge_index: torch.Tensor
-    """
-    Shape:
-        (2, Ela)
-    """
+    agents: list[dict[str, Any]]
 
     ###########################################################################
-    # Masks
+    # Processed Lanes
     ###########################################################################
 
-    agent_mask: torch.Tensor
-
-    lane_mask: torch.Tensor
+    lanes: list[dict[str, Any]]
 
     ###########################################################################
-    # Optional Metadata
+    # Graph
     ###########################################################################
 
-    rotation: Optional[torch.Tensor] = None
-
-    translation: Optional[torch.Tensor] = None
+    graph: GraphData
 
     ###########################################################################
     # Validation
@@ -106,34 +85,17 @@ class SceneData:
 
     def __post_init__(self) -> None:
 
-        if self.agent_features.ndim != 3:
+        if self.origin.shape != (2,):
             raise ValueError(
-                "agent_features must be 3D."
+                "origin must have shape (2,)."
             )
 
-        if self.lane_features.ndim != 3:
-            raise ValueError(
-                "lane_features must be 3D."
-            )
-
-        if self.target_future.ndim != 2:
-            raise ValueError(
-                "target_future must be 2D."
-            )
-
-        if self.target_future.shape[1] != 2:
-            raise ValueError(
-                "target_future must have shape (T,2)."
-            )
-
-        if self.agent_agent_edge_index.ndim != 2:
-            raise ValueError(
-                "agent_agent_edge_index must be 2D."
-            )
-
-        if self.lane_agent_edge_index.ndim != 2:
-            raise ValueError(
-                "lane_agent_edge_index must be 2D."
+        if not isinstance(
+            self.heading,
+            (float, np.floating),
+        ):
+            raise TypeError(
+                "heading must be a float."
             )
 
     ###########################################################################
@@ -142,72 +104,88 @@ class SceneData:
 
     @property
     def num_agents(self) -> int:
-        return self.agent_features.shape[0]
+        return len(self.agents)
 
     @property
     def num_lanes(self) -> int:
-        return self.lane_features.shape[0]
+        return len(self.lanes)
 
     @property
-    def feature_dim(self) -> int:
-        return self.agent_features.shape[-1]
+    def num_agent_edges(self) -> int:
+        return self.graph.agent_agent_edges.shape[1]
 
     @property
-    def lane_feature_dim(self) -> int:
-        return self.lane_features.shape[-1]
+    def num_lane_edges(self) -> int:
+        return self.graph.lane_lane_edges.shape[1]
 
     @property
-    def observation_steps(self) -> int:
-        return self.agent_features.shape[1]
+    def num_lane_agent_edges(self) -> int:
+        return self.graph.lane_agent_edges.shape[1]
 
-    @property
-    def prediction_steps(self) -> int:
-        return self.target_future.shape[0]
-
-    ###########################################################################
-    # Device Utilities
+        ###########################################################################
+    # Agent Utilities
     ###########################################################################
 
-    def to(
-        self,
-        device: torch.device | str,
-    ) -> "SceneData":
+    @property
+    def target_agent(self) -> dict[str, Any]:
+        """
+        Return the prediction target (AGENT).
+        """
 
-        return SceneData(
-            sequence_id=self.sequence_id,
-            city=self.city,
-            agent_features=self.agent_features.to(device),
-            lane_features=self.lane_features.to(device),
-            target_future=self.target_future.to(device),
-            agent_agent_edge_index=self.agent_agent_edge_index.to(device),
-            lane_agent_edge_index=self.lane_agent_edge_index.to(device),
-            agent_mask=self.agent_mask.to(device),
-            lane_mask=self.lane_mask.to(device),
-            rotation=None
-            if self.rotation is None
-            else self.rotation.to(device),
-            translation=None
-            if self.translation is None
-            else self.translation.to(device),
+        for agent in self.agents:
+
+            if agent["category"] == "AGENT":
+                return agent
+
+        raise RuntimeError(
+            "Target agent not found."
         )
+
+    @property
+    def av_agent(self) -> dict[str, Any] | None:
+        """
+        Return the autonomous vehicle.
+        """
+
+        for agent in self.agents:
+
+            if agent["category"] == "AV":
+                return agent
+
+        return None
 
     ###########################################################################
     # Utilities
     ###########################################################################
 
-    def pin_memory(self) -> "SceneData":
-
-        return self.to("cpu")
-
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, Any]:
+        """
+        Return scene statistics.
+        """
 
         return {
             "sequence_id": self.sequence_id,
             "city": self.city,
             "num_agents": self.num_agents,
             "num_lanes": self.num_lanes,
-            "feature_dim": self.feature_dim,
-            "prediction_steps": self.prediction_steps,
+            "agent_edges": self.num_agent_edges,
+            "lane_edges": self.num_lane_edges,
+            "lane_agent_edges": self.num_lane_agent_edges,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Convert the scene into a dictionary.
+        """
+
+        return {
+            "sequence_id": self.sequence_id,
+            "city": self.city,
+            "origin": self.origin,
+            "heading": self.heading,
+            "agents": self.agents,
+            "lanes": self.lanes,
+            "graph": self.graph,
         }
 
     def __len__(self) -> int:
@@ -217,7 +195,10 @@ class SceneData:
 
         return (
             "SceneData("
-            f"sequence={self.sequence_id}, "
+            f"sequence='{self.sequence_id}', "
             f"agents={self.num_agents}, "
-            f"lanes={self.num_lanes})"
+            f"lanes={self.num_lanes}, "
+            f"agent_edges={self.num_agent_edges})"
         )
+
+

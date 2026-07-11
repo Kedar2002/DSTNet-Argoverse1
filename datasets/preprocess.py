@@ -9,6 +9,7 @@ Converts RawScene into normalized numerical features.
 from __future__ import annotations
 
 import numpy as np
+from typing import Any
 
 from datasets.geometry import (
     compute_acceleration,
@@ -19,6 +20,7 @@ from datasets.geometry import (
     sample_centerline,
     transform_points,
 )
+from datasets.scene_data import SceneData
 from datasets.graph_builder import GraphBuilder
 from datasets.raw_scene import RawLane, RawScene
 
@@ -55,7 +57,7 @@ class ScenePreprocessor:
     def preprocess(
         self,
         scene: RawScene,
-    ) -> dict:
+    ) -> SceneData:
         """
         Preprocess one scene.
 
@@ -81,14 +83,15 @@ class ScenePreprocessor:
 
         graph = self.graph_builder.build(scene)
 
-        return {
-            "metadata": scene.metadata,
-            "origin": origin,
-            "heading": heading,
-            "agents": agents,
-            "lanes": lanes,
-            "graph": graph,
-        }
+        return SceneData(
+            sequence_id=scene.metadata.sequence_id,
+            city=scene.metadata.city,
+            origin=origin,
+            heading=heading,
+            agents=agents,
+            lanes=lanes,
+            graph=graph,
+        )
 
         ###########################################################################
     # Reference Frame
@@ -124,12 +127,12 @@ class ScenePreprocessor:
         scene: RawScene,
         origin: np.ndarray,
         heading: float,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
         Process all agent trajectories.
         """
 
-        processed_agents: list[dict] = []
+        processed_agents: list[dict[str, Any]] = []
 
         for track in scene.tracks.values():
 
@@ -189,7 +192,7 @@ class ScenePreprocessor:
         scene: RawScene,
         origin: np.ndarray,
         heading: float,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
         Normalize and sample lane centerlines.
 
@@ -199,7 +202,7 @@ class ScenePreprocessor:
             Processed lane representations.
         """
 
-        processed_lanes: list[dict] = []
+        processed_lanes: list[dict[str, Any]] = []
 
         for lane in scene.lanes.values():
 
