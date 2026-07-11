@@ -1,0 +1,25 @@
+experiment:
+
+  name: "paper"
+
+training:
+
+  stage: "backbone"
+
+  epochs: 60
+
+  batch_size: 128
+
+  amp: true
+
+runtime:
+
+  device: "cuda"
+
+  num_workers: 16
+
+  pin_memory: true
+
+dataset:
+
+  enable_cache: true

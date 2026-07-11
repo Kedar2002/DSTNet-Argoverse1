@@ -1,0 +1,33 @@
+experiment:
+
+  name: "debug"
+
+dataset:
+
+  debug: true
+
+  debug_scenes: 500
+
+training:
+
+  stage: "backbone"
+
+  epochs: 2
+
+  batch_size: 4
+
+  amp: false
+
+runtime:
+
+  device: "cpu"
+
+  num_workers: 2
+
+  pin_memory: false
+
+visualization:
+
+  enable: true
+
+  save_images: true

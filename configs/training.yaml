@@ -1,0 +1,71 @@
+training:
+
+  experiment_name: "dstnet"
+
+  stage: "backbone"
+
+  backbone:
+
+    enable_refinement: false
+
+    load_checkpoint: false
+
+    checkpoint: ""
+
+  refinement:
+
+    enable_refinement: true
+
+    load_checkpoint: true
+
+    checkpoint: "checkpoints/backbone_best.pth"
+
+  optimizer: "adamw"
+
+  learning_rate: 3.0e-4
+
+  weight_decay: 1.0e-4
+
+  betas:
+
+    - 0.9
+
+    - 0.999
+
+  scheduler: "cosine"
+
+  min_lr: 1.0e-6
+
+  epochs: 60
+
+  batch_size: 128
+
+  gradient_clip: 5.0
+
+  accumulation_steps: 1
+
+  amp: true
+
+  save_every: 5
+
+  keep_last: 5
+
+  validate_every: 1
+
+  early_stopping: false
+
+  patience: 20
+
+loss:
+
+  winner_takes_all: true
+
+  proposal_weight: 1.0
+
+  refinement_weight: 1.0
+
+  classification_weight: 1.0
+
+  score_weight: 4.0
+
+  huber_delta: 1.0

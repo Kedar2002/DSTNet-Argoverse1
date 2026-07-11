@@ -1,0 +1,23 @@
+runtime:
+
+  device: "auto"
+
+  num_workers: 4
+
+  pin_memory: true
+
+  seed: 42
+
+  deterministic: true
+
+  log_interval: 20
+
+  output_dir: "outputs"
+
+  log_dir: "logs"
+
+  checkpoint_dir: "checkpoints"
+
+  enable_tensorboard: true
+
+  save_plots: true

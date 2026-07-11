@@ -1,0 +1,43 @@
+dataset:
+
+  name: "argoverse1"
+
+  root: "data/argoverse1"
+
+  train_dir: "data/argoverse1/train"
+
+  val_dir: "data/argoverse1/val"
+
+  test_dir: "data/argoverse1/test"
+
+  cache_dir: "data/argoverse1/cache"
+
+  file_extension: ".csv"
+
+  cache_extension: ".pt"
+
+  history_frames: 20
+
+  future_frames: 30
+
+  frame_rate: 10
+
+  max_agents: 128
+
+  target_only: false
+
+  use_map: true
+
+  map_radius: 100.0
+
+  enable_cache: true
+
+  rebuild_cache: false
+
+  cache_version: "v1"
+
+  normalize_coordinates: true
+
+  normalize_rotation: true
+
+  debug_scenes: 500
