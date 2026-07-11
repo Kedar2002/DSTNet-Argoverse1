@@ -1,34 +1,58 @@
 from pathlib import Path
 
+from datasets.cache_manager import CacheManager
+from datasets.preprocess import ScenePreprocessor
 from datasets.scene_parser import SceneParser
-from datasets.transforms import (
-    build_eval_transform,
-    build_train_transform,
-)
 
 
-scene = SceneParser(None)(
-    Path("data/argoverse1/train/1.csv")
-)
+def main() -> None:
 
-print("Original")
+    parser = SceneParser(None)
 
-print(scene.target_track.last_position)
+    scene = parser(
+        Path("data/argoverse1/train/1.csv")
+    )
 
-train = build_train_transform()
+    preprocessor = ScenePreprocessor(
+        observation_steps=20,
+        prediction_steps=30,
+        lane_sample_points=20,
+        agent_radius=30.0,
+        lane_radius=20.0,
+    )
 
-scene2 = train(scene)
+    processed = preprocessor.preprocess(scene)
 
-print()
+    cache = CacheManager("cache")
 
-print("Augmented")
+    cache.save(processed)
 
-print(scene2.target_track.last_position)
+    loaded = cache.load(
+        processed.sequence_id
+    )
 
-print()
+    print("=" * 70)
+    print("Cache Summary")
+    print("=" * 70)
 
-print("Evaluation")
+    print(cache.summary())
 
-scene3 = build_eval_transform()(scene)
+    print()
 
-print(scene3.target_track.last_position)
+    print("Loaded Scene")
+
+    print(loaded)
+
+    print()
+
+    print("Agents :", loaded.num_agents)
+
+    print("Lanes  :", loaded.num_lanes)
+
+    print()
+
+    print("Cache Exists :", cache.exists(processed.sequence_id))
+
+
+if __name__ == "__main__":
+    main()
