@@ -12,8 +12,6 @@ model:
 
   tri_atm_layers: 2
 
-  spatial_radius: 0.5
-
   feature_dropout: 0.1
 
   window_size: 4

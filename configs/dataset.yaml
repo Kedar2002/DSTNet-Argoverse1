@@ -16,9 +16,9 @@ dataset:
 
   cache_extension: ".pt"
 
-  history_frames: 20
+  observation_steps: 20
 
-  future_frames: 30
+  prediction_steps: 30
 
   frame_rate: 10
 
@@ -30,14 +30,26 @@ dataset:
 
   map_radius: 100.0
 
-  enable_cache: true
-
-  rebuild_cache: false
-
-  cache_version: "v1"
-
   normalize_coordinates: true
 
   normalize_rotation: true
 
   debug_scenes: 500
+
+  max_lanes: 256
+
+  lane_sample_points: 20
+
+  agent_agent_radius: 30.0
+
+  lane_agent_radius: 20.0
+
+  max_neighbors: 32
+
+cache:
+
+    enabled: true
+
+    rebuild: false
+
+    version: v1

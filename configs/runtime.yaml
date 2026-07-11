@@ -21,3 +21,5 @@ runtime:
   enable_tensorboard: true
 
   save_plots: true
+
+  benchmark: false
