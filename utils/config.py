@@ -18,6 +18,7 @@ from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
+from collections.abc import ItemsView, KeysView, ValuesView
 
 import yaml
 
@@ -125,22 +126,16 @@ class ConfigNode:
 
         return iter(self._data)
 
-    def items(
-        self,
-    ):
+    def __len__(self) -> int:
+        return len(self._data)
 
+    def items(self) -> ItemsView[str, Any]:
         return self._data.items()
 
-    def keys(
-        self,
-    ):
-
+    def keys(self) -> KeysView[str]:
         return self._data.keys()
 
-    def values(
-        self,
-    ):
-
+    def values(self) -> ValuesView[Any]:
         return self._data.values()
 
     ###########################################################################
