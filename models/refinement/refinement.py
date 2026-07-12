@@ -98,7 +98,7 @@ class Refinement(nn.Module):
         # Initial Anchor Selection
         ###############################################################
 
-        anchors = self.anchor_selector(
+        anchors, scores = self.anchor_selector(
             trajectories,
             scores,
         )
@@ -114,6 +114,7 @@ class Refinement(nn.Module):
             context = self.context_encoder(
                 scene_features=encoder_features,
                 anchors=refined,
+                scores=scores,
             )
 
             refined = refinement_layer(

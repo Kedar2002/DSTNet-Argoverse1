@@ -49,7 +49,7 @@ class AnchorSelector(nn.Module):
         self,
         trajectories: torch.Tensor,
         scores: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
         if trajectories.ndim != 5:
             raise ValueError(
@@ -67,18 +67,36 @@ class AnchorSelector(nn.Module):
             )
 
         #######################################################################
-        # Current implementation
+        # Rank trajectory hypotheses by confidence.
         #
-        # Use coarse trajectories as adaptive anchors.
-        #
-        # The DSTNet paper does not specify a separate anchor generation
-        # mechanism. Therefore, the decoder outputs are treated as the
-        # initial anchors for the refinement module.
+        # All K modes are preserved, but they are reordered so that the
+        # highest-confidence hypothesis is refined first.
         #######################################################################
 
-        return trajectories
+        indices = torch.argsort(
+            scores,
+            dim=-1,
+            descending=True,
+        )
 
-    ###########################################################################
+        trajectories = torch.gather(
+            trajectories,
+            dim=2,
+            index=indices[..., None, None].expand_as(
+                trajectories
+            ),
+        )
+
+        scores = torch.gather(
+            scores,
+            dim=2,
+            index=indices,
+        )
+
+        return (
+            trajectories,
+            scores,
+        )
 
     def __repr__(
         self,

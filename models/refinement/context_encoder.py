@@ -61,11 +61,27 @@ class ContextEncoder(nn.Module):
         )
 
         #######################################################################
+        # Score Encoder
+        #######################################################################
+
+        self.score_encoder = nn.Sequential(
+            nn.Linear(
+                1,
+                hidden_dim,
+            ),
+            nn.ReLU(),
+            nn.Linear(
+                hidden_dim,
+                hidden_dim,
+            ),
+        )
+
+        #######################################################################
         # Scene + Anchor Fusion
         #######################################################################
 
         self.fusion = MLP(
-            input_dim=hidden_dim * 2,
+            input_dim=hidden_dim * 3,
             hidden_dims=[hidden_dim],
             output_dim=hidden_dim,
             dropout=dropout,
@@ -81,6 +97,7 @@ class ContextEncoder(nn.Module):
         self,
         scene_features: torch.Tensor,
         anchors: torch.Tensor,
+        scores: torch.Tensor,
     ) -> torch.Tensor:
         """
         Parameters
@@ -131,6 +148,14 @@ class ContextEncoder(nn.Module):
         )
 
         ###################################################################
+        # Encode confidence score
+        ###################################################################
+
+        score_features = self.score_encoder(
+            scores.unsqueeze(-1),
+        )
+
+        ###################################################################
         # Expand scene features
         ###################################################################
 
@@ -153,6 +178,7 @@ class ContextEncoder(nn.Module):
             (
                 scene_features,
                 anchor_features,
+                score_features,
             ),
             dim=-1,
         )
