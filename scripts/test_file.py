@@ -1,61 +1,86 @@
 """
-scripts.test_mmia
+scripts.test_gsta
 
-Unit test for Multi-Modal Interaction Attention.
+Unit test for the GSTA layer.
 """
 
 import torch
 
-from models.attention.mmia import MMIA
+from models.encoders.gsta import GSTA
 
 
 def main():
 
     print("=" * 80)
-    print("MMIA Test")
+    print("GSTA Test")
     print("=" * 80)
 
     B = 2
-    N = 16
+    Na = 12
+    Nl = 20
     C = 256
 
-    spatial = torch.randn(
+    agents = torch.randn(
         B,
-        N,
+        Na,
         C,
     )
 
-    cross = torch.randn(
+    lanes = torch.randn(
         B,
-        N,
+        Nl,
         C,
     )
 
-    model = MMIA(
+    agent_mask = torch.ones(
+        B,
+        Na,
+        dtype=torch.bool,
+    )
+
+    lane_mask = torch.ones(
+        B,
+        Nl,
+        dtype=torch.bool,
+    )
+
+    model = GSTA(
         hidden_dim=C,
+        num_heads=8,
+        dropout=0.1,
     )
 
     print(model)
     print()
 
-    output = model(
-        spatial,
-        cross,
+    out_agents, out_lanes = model(
+        agent_features=agents,
+        lane_features=lanes,
+        agent_mask=agent_mask,
+        lane_mask=lane_mask,
     )
 
-    print("Spatial :", spatial.shape)
-    print("Cross   :", cross.shape)
-    print("Output  :", output.shape)
+    print("Input Agent Shape :", agents.shape)
+    print("Output Agent Shape:", out_agents.shape)
+    print()
 
-    assert output.shape == (
+    print("Input Lane Shape  :", lanes.shape)
+    print("Output Lane Shape :", out_lanes.shape)
+
+    assert out_agents.shape == (
         B,
-        N,
+        Na,
+        C,
+    )
+
+    assert out_lanes.shape == (
+        B,
+        Nl,
         C,
     )
 
     print()
-
-    print("✓ MMIA test passed")
+    print("✓ GSTA test passed")
 
 
 if __name__ == "__main__":
