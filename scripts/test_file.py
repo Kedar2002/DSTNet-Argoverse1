@@ -1,86 +1,93 @@
-"""
-scripts.test_gsta
-
-Unit test for the GSTA layer.
-"""
-
 import torch
 
-from models.encoders.gsta import GSTA
+from models.encoders.agent_encoder import AgentEncoder
+from models.encoders.lane_encoder import LaneEncoder
+from models.encoders.relative_embedding import RelativeEmbedding
+from models.attention.tri_atm import TriATM
 
 
 def main():
 
-    print("=" * 80)
-    print("GSTA Test")
-    print("=" * 80)
-
     B = 2
-    Na = 12
-    Nl = 20
-    C = 256
+    N = 16
+    L = 24
+    T = 20
+    H = 256
 
-    agents = torch.randn(
-        B,
-        Na,
-        C,
+    ############################################################
+
+    agent_traj = torch.randn(B, N, T, 2)
+    lane_points = torch.randn(B, L, T, 2)
+
+    positions = agent_traj[:, :, -1]
+
+    headings = torch.randn(B, N)
+
+    ############################################################
+
+    agent_encoder = AgentEncoder(
+        observation_steps=T,
+        hidden_dim=H,
     )
 
-    lanes = torch.randn(
-        B,
-        Nl,
-        C,
+    lane_encoder = LaneEncoder(
+        num_points=T,
+        hidden_dim=H,
     )
 
-    agent_mask = torch.ones(
-        B,
-        Na,
-        dtype=torch.bool,
+    relative_embedding = RelativeEmbedding(
+        hidden_dim=H,
     )
 
-    lane_mask = torch.ones(
-        B,
-        Nl,
-        dtype=torch.bool,
+    ############################################################
+
+    agent_features = agent_encoder(agent_traj)
+
+    lane_features = lane_encoder(lane_points)
+
+    relative = relative_embedding(
+        positions,
+        headings,
     )
 
-    model = GSTA(
-        hidden_dim=C,
+    ############################################################
+
+    triatm = TriATM(
+        hidden_dim=H,
         num_heads=8,
-        dropout=0.1,
     )
 
-    print(model)
+    agent_features, lane_features = triatm(
+        agent_features=agent_features,
+        lane_features=lane_features,
+        relative=relative,
+        graph=None,
+        positions=positions,
+    )
+
+    ############################################################
+
     print()
 
-    out_agents, out_lanes = model(
-        agent_features=agents,
-        lane_features=lanes,
-        agent_mask=agent_mask,
-        lane_mask=lane_mask,
-    )
+    print("=" * 60)
 
-    print("Input Agent Shape :", agents.shape)
-    print("Output Agent Shape:", out_agents.shape)
-    print()
+    print("TriATM Test Passed")
 
-    print("Input Lane Shape  :", lanes.shape)
-    print("Output Lane Shape :", out_lanes.shape)
-
-    assert out_agents.shape == (
-        B,
-        Na,
-        C,
-    )
-
-    assert out_lanes.shape == (
-        B,
-        Nl,
-        C,
-    )
+    print("=" * 60)
 
     print()
-    print("✓ GSTA test passed")
+
+    print("Agent Features :", agent_features.shape)
+
+    print("Lane Features  :", lane_features.shape)
+
+    print()
+
+    assert agent_features.shape == (B, N, H)
+
+    assert lane_features.shape == (B, L, H)
+
+    print("✓ Shapes Verified")
 
 
 if __name__ == "__main__":

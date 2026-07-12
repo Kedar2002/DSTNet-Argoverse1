@@ -114,6 +114,7 @@ class Encoder(nn.Module):
                 lane_features=lane_features,
                 relative=relative,
                 graph=graph,
+                positions=positions,
                 agent_mask=agent_mask,
                 lane_mask=lane_mask,
             )
@@ -139,4 +140,4 @@ class Encoder(nn.Module):
             f"layers={self.num_layers})"
         )
 
-    
+
