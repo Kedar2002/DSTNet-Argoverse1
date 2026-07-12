@@ -1,10 +1,10 @@
 """
 models.encoders.relative_embedding
 
-Relative spatial-temporal embedding for DSTNet.
+Relative geometric embedding for DSTNet.
 
-This module computes pairwise geometric embeddings that are
-consumed by the graph-aware attention blocks.
+Computes pairwise geometric features between agents and projects
+them into the latent feature space.
 """
 
 from __future__ import annotations
@@ -12,105 +12,122 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from models.layers.mlp import MLP
+from models.model_types import RelativeFeatures
+
 
 class RelativeEmbedding(nn.Module):
     """
-    Relative spatial embedding.
-
-    Input
-    -----
-    positions : (B, N, 2)
-
-    headings : (B, N)
-
-    Output
-    ------
-    (B, N, N, hidden_dim)
+    Relative geometry embedding.
     """
 
     def __init__(
         self,
-        hidden_dim: int,
+        hidden_dim: int = 256,
+        dropout: float = 0.1,
     ) -> None:
 
         super().__init__()
 
-        self._hidden_dim = hidden_dim
+        self.hidden_dim = hidden_dim
 
-        #
-        # Input features
-        #
-        # dx
-        # dy
-        # distance
-        # sin(d_heading)
-        # cos(d_heading)
-        #
-
-        self.embedding = nn.Sequential(
-            nn.Linear(5, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
+        self.embedding = MLP(
+            input_dim=4,
+            hidden_dims=[hidden_dim],
+            output_dim=hidden_dim,
+            dropout=dropout,
         )
-
-        ###########################################################################
-    # Forward
-    ###########################################################################
 
     def forward(
         self,
         positions: torch.Tensor,
         headings: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> RelativeFeatures:
+        """
+        Parameters
+        ----------
+        positions
+            Shape (B, N, 2)
 
-        #
-        # positions
-        #
-        # (B,N,2)
-        #
+        headings
+            Shape (B, N)
+
+        Returns
+        -------
+        RelativeFeatures
+        """
+
+        if positions.ndim != 3:
+            raise ValueError(
+                "positions must have shape (B,N,2)."
+            )
+
+        if headings.ndim != 2:
+            raise ValueError(
+                "headings must have shape (B,N)."
+            )
+
+        ###############################################################
+        # Pairwise position differences
+        ###############################################################
 
         delta = (
             positions[:, :, None, :]
-            -
-            positions[:, None, :, :]
+            - positions[:, None, :, :]
         )
 
         dx = delta[..., 0]
 
         dy = delta[..., 1]
 
-        distance = torch.sqrt(
-            dx * dx + dy * dy + 1e-6
+        ###############################################################
+        # Distance
+        ###############################################################
+
+        distance = torch.linalg.norm(
+            delta,
+            dim=-1,
         )
+
+        ###############################################################
+        # Heading difference
+        ###############################################################
 
         heading_delta = (
             headings[:, :, None]
-            -
-            headings[:, None, :]
+            - headings[:, None, :]
         )
+
+        ###############################################################
+        # Relative vector
+        ###############################################################
 
         features = torch.stack(
             (
                 dx,
                 dy,
                 distance,
-                torch.sin(heading_delta),
-                torch.cos(heading_delta),
+                heading_delta,
             ),
             dim=-1,
         )
 
-        return self.embedding(
-            features,
+        embedding = self.embedding(
+            features
         )
 
-    def __repr__(
-        self,
-    ) -> str:
+        return RelativeFeatures(
+            dx=dx,
+            dy=dy,
+            distance=distance,
+            heading_delta=heading_delta,
+            embedding=embedding,
+        )
+
+    def __repr__(self) -> str:
 
         return (
             "RelativeEmbedding("
-            f"hidden_dim={self._hidden_dim})"
+            f"hidden_dim={self.hidden_dim})"
         )
 
-    

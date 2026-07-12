@@ -1,239 +1,221 @@
 """
-scripts.test_collate
+scripts.test_attention
 
-Integration test for the complete batching pipeline.
-
-Pipeline
-
-CSV
-    ↓
-SceneParser
-    ↓
-ScenePreprocessor
-    ↓
-SceneData
-    ↓
-DataLoader
-    ↓
-collate_fn
+Unit tests for the generic MultiHeadAttention layer.
 """
 
 from __future__ import annotations
 
-from torch.utils.data import DataLoader
+import torch
 
-from datasets.argoverse_dataset import ArgoverseDataset
-from datasets.collate import collate_fn
-from datasets.preprocess import ScenePreprocessor
-from datasets.scene_parser import SceneParser
+from models.layers.attention import MultiHeadAttention
 
 
-###############################################################################
-# Dummy Map
-###############################################################################
+def print_header(title: str) -> None:
+    print()
+    print("=" * 80)
+    print(title)
+    print("=" * 80)
 
 
-class DummyLaneSegment:
+def test_self_attention() -> None:
 
-    def __init__(self):
+    print_header("Self Attention")
 
-        import numpy as np
+    B = 2
+    N = 16
+    C = 256
 
-        self.centerline = np.array(
-            [
-                [0.0, 0.0],
-                [5.0, 0.0],
-                [10.0, 0.0],
-            ],
-            dtype=np.float32,
-        )
+    x = torch.randn(B, N, C)
 
-        self.is_intersection = False
-        self.turn_direction = "NONE"
-        self.has_traffic_control = False
+    model = MultiHeadAttention(
+        hidden_dim=C,
+        num_heads=8,
+    )
 
-
-class DummyMap:
-
-    def __init__(self):
-
-        self.city_lane_centerlines_dict = {
-            "PIT": {
-                0: DummyLaneSegment(),
-                1: DummyLaneSegment(),
-            },
-            "MIA": {
-                0: DummyLaneSegment(),
-                1: DummyLaneSegment(),
-            },
-        }
-
-    def get_lane_ids_in_xy_bbox(
-        self,
+    y = model(
         x,
-        y,
-        city,
-        query_search_range_manhattan=50.0,
-    ):
-
-        return [0, 1]
-
-
-###############################################################################
-# Main
-###############################################################################
-
-
-def main():
-
-    print("=" * 80)
-    print("DSTNet Collate Test")
-    print("=" * 80)
-    print()
-
-    ###########################################################################
-    # Build dataset
-    ###########################################################################
-
-    parser = SceneParser(
-        DummyMap(),
+        x,
+        x,
     )
 
-    preprocessor = ScenePreprocessor(
-        observation_steps=20,
-        prediction_steps=30,
-        lane_sample_points=20,
-        agent_radius=50.0,
-        lane_radius=50.0,
+    print("Input :", x.shape)
+    print("Output:", y.shape)
+
+    assert y.shape == (B, N, C)
+
+    print("✓ Passed")
+
+
+def test_cross_attention() -> None:
+
+    print_header("Cross Attention")
+
+    B = 2
+    N = 12
+    M = 20
+    C = 256
+
+    query = torch.randn(B, N, C)
+
+    key = torch.randn(B, M, C)
+
+    value = torch.randn(B, M, C)
+
+    model = MultiHeadAttention(
+        hidden_dim=C,
+        num_heads=8,
     )
 
-    dataset = ArgoverseDataset(
-        root="data/argoverse1/train",
-        parser=parser,
-        preprocessor=preprocessor,
+    output = model(
+        query,
+        key,
+        value,
     )
 
-    print(dataset)
-    print()
+    print("Query :", query.shape)
+    print("Key   :", key.shape)
+    print("Value :", value.shape)
+    print("Output:", output.shape)
 
-    ###########################################################################
-    # DataLoader
-    ###########################################################################
+    assert output.shape == (B, N, C)
 
-    loader = DataLoader(
-        dataset,
-        batch_size=2,
-        shuffle=False,
-        collate_fn=collate_fn,
+    print("✓ Passed")
+
+
+def test_mask() -> None:
+
+    print_header("Attention Mask")
+
+    B = 2
+    N = 12
+    C = 256
+
+    x = torch.randn(B, N, C)
+
+    mask = torch.ones(
+        B,
+        N,
+        dtype=torch.bool,
     )
 
-    batch = next(iter(loader))
+    mask[:, -3:] = False
 
-    ###########################################################################
-    # Metadata
-    ###########################################################################
+    model = MultiHeadAttention(
+        hidden_dim=C,
+        num_heads=8,
+    )
 
-    print("=" * 80)
-    print("Metadata")
-    print("=" * 80)
+    y = model(
+        x,
+        x,
+        x,
+        mask=mask,
+    )
 
-    print("Sequence IDs :", batch["metadata"]["sequence_id"])
-    print("Cities       :", batch["metadata"]["city"])
-    print("Origin Shape :", batch["metadata"]["origin"].shape)
-    print("Heading Shape:", batch["metadata"]["heading"].shape)
+    print("Mask Shape :", mask.shape)
+    print("Output     :", y.shape)
 
-    ###########################################################################
-    # Agents
-    ###########################################################################
+    assert y.shape == (B, N, C)
 
-    print()
-    print("=" * 80)
-    print("Agent Tensors")
-    print("=" * 80)
+    print("✓ Passed")
 
-    for key, value in batch["agents"].items():
 
-        print(f"{key:<20} {tuple(value.shape)}")
+def test_attention_bias() -> None:
 
-    ###########################################################################
-    # Lanes
-    ###########################################################################
+    print_header("Attention Bias")
 
-    print()
-    print("=" * 80)
-    print("Lane Tensors")
-    print("=" * 80)
+    B = 2
+    N = 10
+    C = 256
 
-    for key, value in batch["lanes"].items():
+    x = torch.randn(B, N, C)
 
-        print(f"{key:<20} {tuple(value.shape)}")
+    bias = torch.randn(
+        B,
+        1,
+        N,
+        N,
+    )
 
-    ###########################################################################
-    # Graphs
-    ###########################################################################
+    model = MultiHeadAttention(
+        hidden_dim=C,
+        num_heads=8,
+    )
 
-    print()
-    print("=" * 80)
-    print("Graphs")
-    print("=" * 80)
+    y = model(
+        x,
+        x,
+        x,
+        attention_bias=bias,
+    )
 
-    print("Scenes :", len(batch["graphs"]))
+    print("Bias Shape :", bias.shape)
+    print("Output     :", y.shape)
 
-    for i, graph in enumerate(batch["graphs"]):
+    assert y.shape == (B, N, C)
 
-        print()
+    print("✓ Passed")
 
-        print(f"Scene {i}")
 
-        print(
-            "  Agent-Agent :",
-            graph.agent_agent_edges.shape,
-        )
+def test_return_attention() -> None:
 
-        print(
-            "  Lane-Lane  :",
-            graph.lane_lane_edges.shape,
-        )
+    print_header("Return Attention Weights")
 
-        print(
-            "  Lane-Agent :",
-            graph.lane_agent_edges.shape,
-        )
+    B = 2
+    N = 8
+    C = 256
 
-    ###########################################################################
-    # Assertions
-    ###########################################################################
+    x = torch.randn(B, N, C)
 
-    print()
-    print("=" * 80)
-    print("Running Assertions")
-    print("=" * 80)
+    model = MultiHeadAttention(
+        hidden_dim=C,
+        num_heads=8,
+    )
 
-    assert batch["agents"]["observed"].ndim == 4
-    assert batch["agents"]["future"].ndim == 4
-    assert batch["agents"]["velocity"].ndim == 4
-    assert batch["agents"]["acceleration"].ndim == 4
+    output, weights = model(
+        x,
+        x,
+        x,
+        return_attention=True,
+    )
 
-    assert batch["agents"]["heading"].ndim == 3
-    assert batch["agents"]["speed"].ndim == 3
+    print("Output Shape    :", output.shape)
+    print("Attention Shape :", weights.shape)
 
-    assert batch["agents"]["observed_mask"].ndim == 3
-    assert batch["agents"]["future_mask"].ndim == 3
-    assert batch["agents"]["agent_mask"].ndim == 2
+    assert output.shape == (B, N, C)
 
-    assert batch["lanes"]["centerline"].ndim == 4
-    assert batch["lanes"]["direction"].ndim == 4
-    assert batch["lanes"]["mask"].ndim == 2
+    assert weights.shape == (
+        B,
+        8,
+        N,
+        N,
+    )
 
-    print("✓ Tensor dimensions verified.")
+    print("✓ Passed")
 
-    ###########################################################################
+
+def main() -> None:
 
     print()
     print("=" * 80)
-    print("Collate Test Passed")
+    print("DSTNet MultiHeadAttention Test")
     print("=" * 80)
+
+    test_self_attention()
+
+    test_cross_attention()
+
+    test_mask()
+
+    test_attention_bias()
+
+    test_return_attention()
+
     print()
+    print("=" * 80)
+    print("All Attention Tests Passed")
+    print("=" * 80)
 
 
 if __name__ == "__main__":

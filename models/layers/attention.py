@@ -111,8 +111,11 @@ class MultiHeadAttention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        *,
         mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        attention_bias: torch.Tensor | None = None,
+        return_attention: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
 
         q = self._reshape(
             self.q_proj(query),
@@ -126,6 +129,10 @@ class MultiHeadAttention(nn.Module):
             self.v_proj(value),
         )
 
+        #######################################################################
+        # Scaled Dot Product
+        #######################################################################
+
         scores = torch.matmul(
             q,
             k.transpose(-2, -1),
@@ -135,12 +142,36 @@ class MultiHeadAttention(nn.Module):
             self._head_dim,
         )
 
+        #######################################################################
+        # Relative Attention Bias
+        #######################################################################
+
+        if attention_bias is not None:
+
+            scores = scores + attention_bias
+
+        #######################################################################
+        # Mask
+        #######################################################################
+
         if mask is not None:
 
+            if mask.ndim == 2:
+                # (B,M) -> (B,1,1,M)
+                mask = mask[:, None, None, :]
+
+            elif mask.ndim == 3:
+                # (B,N,M) -> (B,1,N,M)
+                mask = mask[:, None, :, :]
+
             scores = scores.masked_fill(
-                mask == 0,
-                float("-inf"),
+                ~mask,
+                torch.finfo(scores.dtype).min,
             )
+
+        #######################################################################
+        # Attention
+        #######################################################################
 
         attention = torch.softmax(
             scores,
@@ -150,6 +181,10 @@ class MultiHeadAttention(nn.Module):
         attention = self.dropout(
             attention,
         )
+
+        #######################################################################
+        # Aggregate
+        #######################################################################
 
         output = torch.matmul(
             attention,
@@ -170,6 +205,10 @@ class MultiHeadAttention(nn.Module):
         output = self.out_proj(
             output,
         )
+
+        if return_attention:
+
+            return output, attention
 
         return output
 
