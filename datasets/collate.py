@@ -3,8 +3,11 @@ datasets.collate
 
 Batch collation for DSTNet.
 
-Converts a list of SceneData objects into batched
-PyTorch tensors.
+Converts SceneData objects into batched tensors.
+
+Unlike the initial implementation, this version batches
+ALL agents and ALL lanes, creating padding masks that
+the attention modules can consume.
 """
 
 from __future__ import annotations
@@ -18,75 +21,72 @@ from datasets.scene_data import SceneData
 
 
 ###############################################################################
-# Helper
+# Helpers
 ###############################################################################
 
 
-def _stack(
-    arrays: list[np.ndarray],
+def _to_tensor(
+    array: np.ndarray,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """
-    Stack NumPy arrays into a PyTorch tensor.
-    """
 
     return torch.as_tensor(
-        np.stack(arrays, axis=0),
+        array,
         dtype=dtype,
     )
 
-###############################################################################
-# Agent Features
-###############################################################################
 
+def _pad_array(
+    arrays: list[np.ndarray],
+    pad_shape: tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Pad a list of arrays.
 
-def _collate_agents(
-    batch: list[SceneData],
-) -> dict[str, torch.Tensor]:
+    Returns
+    -------
+    tensor
+        (B, max_items, ...)
 
-    observed = []
-    future = []
-    velocity = []
-    speed = []
-    acceleration = []
-    heading = []
+    mask
+        (B, max_items)
+        True = valid
+    """
 
-    for scene in batch:
+    batch_size = len(arrays)
 
-        target = scene.target_agent
+    max_items = max(
+        array.shape[0]
+        for array in arrays
+    )
 
-        observed.append(
-            target["observed"]
-        )
+    padded = torch.zeros(
+        (
+            batch_size,
+            max_items,
+            *pad_shape,
+        ),
+        dtype=torch.float32,
+    )
 
-        future.append(
-            target["future"]
-        )
+    mask = torch.zeros(
+        (
+            batch_size,
+            max_items,
+        ),
+        dtype=torch.bool,
+    )
 
-        velocity.append(
-            target["velocity"]
-        )
+    for i, array in enumerate(arrays):
 
-        speed.append(
-            target["speed"]
-        )
+        length = array.shape[0]
 
-        acceleration.append(
-            target["acceleration"]
-        )
+        padded[i, :length] = _to_tensor(array)
 
-        heading.append(
-            target["heading"]
-        )
+        mask[i, :length] = True
 
-    return {
-        "observed": _stack(observed),
-        "future": _stack(future),
-        "velocity": _stack(velocity),
-        "speed": _stack(speed),
-        "acceleration": _stack(acceleration),
-        "heading": _stack(heading),
-    }
+    return padded, mask
+
 
 ###############################################################################
 # Metadata
@@ -106,11 +106,14 @@ def _collate_metadata(
             scene.city
             for scene in batch
         ],
-        "origin": _stack(
-            [
-                scene.origin
-                for scene in batch
-            ]
+        "origin": torch.as_tensor(
+            np.stack(
+                [
+                    scene.origin
+                    for scene in batch
+                ]
+            ),
+            dtype=torch.float32,
         ),
         "heading": torch.tensor(
             [
@@ -121,6 +124,131 @@ def _collate_metadata(
         ),
     }
 
+
+###############################################################################
+# Agents
+###############################################################################
+
+
+def _collate_agents(
+    batch: list[SceneData],
+) -> dict[str, torch.Tensor]:
+
+    observed = [
+        np.stack(
+            [
+                agent["observed"]
+                for agent in scene.agents
+            ]
+        )
+        for scene in batch
+    ]
+
+    future = [
+        np.stack(
+            [
+                agent["future"]
+                for agent in scene.agents
+            ]
+        )
+        for scene in batch
+    ]
+
+    velocity = [
+        np.stack(
+            [
+                agent["velocity"]
+                for agent in scene.agents
+            ]
+        )
+        for scene in batch
+    ]
+
+    heading = [
+        np.stack(
+            [
+                agent["heading"]
+                for agent in scene.agents
+            ]
+        )
+        for scene in batch
+    ]
+
+    observed, mask = _pad_array(
+        observed,
+        observed[0].shape[1:],
+    )
+
+    future, _ = _pad_array(
+        future,
+        future[0].shape[1:],
+    )
+
+    velocity, _ = _pad_array(
+        velocity,
+        velocity[0].shape[1:],
+    )
+
+    heading, _ = _pad_array(
+        heading,
+        heading[0].shape[1:],
+    )
+
+    return {
+        "observed": observed,
+        "future": future,
+        "velocity": velocity,
+        "heading": heading,
+        "mask": mask,
+    }
+
+
+###############################################################################
+# Lanes
+###############################################################################
+
+
+def _collate_lanes(
+    batch: list[SceneData],
+) -> dict[str, torch.Tensor]:
+
+    centerlines = [
+        np.stack(
+            [
+                lane["centerline"]
+                for lane in scene.lanes
+            ]
+        )
+        for scene in batch
+    ]
+
+    directions = [
+        np.stack(
+            [
+                lane["direction"]
+                for lane in scene.lanes
+            ]
+        )
+        for scene in batch
+    ]
+
+    centerlines, mask = _pad_array(
+        centerlines,
+        centerlines[0].shape[1:],
+    )
+
+    directions, _ = _pad_array(
+        directions,
+        directions[0].shape[1:],
+    )
+
+    return {
+        "centerline": centerlines,
+        "direction": directions,
+        "mask": mask,
+    }
+
+
 ###############################################################################
 # Public API
 ###############################################################################
@@ -129,16 +257,13 @@ def _collate_metadata(
 def collate_fn(
     batch: list[SceneData],
 ) -> dict[str, Any]:
-    """
-    Collate SceneData objects into a batch.
-
-    Currently batches only the target-agent tensors.
-    Graphs and lane tensors will be added once the
-    custom map loader is implemented.
-    """
 
     return {
         "metadata": _collate_metadata(batch),
         "agents": _collate_agents(batch),
-        "scenes": batch,
+        "lanes": _collate_lanes(batch),
+        "graphs": [
+            scene.graph
+            for scene in batch
+        ],
     }

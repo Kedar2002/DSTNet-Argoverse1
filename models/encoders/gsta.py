@@ -1,24 +1,17 @@
 """
-models.encoders.gsta
+models/gsta.py
 
 Global Spatio-Temporal Attention (GSTA)
 
-Paper:
-DSTNet
-
-This module constructs the global scene representation before
-the Tri-Attention encoder.
+Implements Fig.3 and Equations (3)-(9) of DSTNet.
 """
 
 from __future__ import annotations
 
 import torch
-from torch import nn
+import torch.nn as nn
 
-from models.encoders.relative_embedding import RelativeEmbedding
-from models.layers.attention import MultiHeadAttention
-from models.layers.feed_forward import FeedForward
-from models.layers.normalization import build_normalization
+from models.layers.transformer import TransformerBlock
 
 
 class GSTA(nn.Module):
@@ -27,163 +20,220 @@ class GSTA(nn.Module):
 
     Inputs
     ------
-    agent_features : (B, Na, C)
-
-    lane_features : (B, Nl, C)
-
-    positions : (B, Na, 2)
-
-    headings : (B, Na)
+    agent_feat : [N,H,D]
+    map_feat   : [M,D]
+    rel_feat   : [N,H,D]
 
     Output
     ------
-    Scene representation
+    scene_feat : [N,H,K,D]
     """
 
     def __init__(
         self,
-        hidden_dim: int,
-        num_heads: int,
+        hidden_dim: int = 128,
+        num_modes: int = 6,
+        num_heads: int = 8,
         dropout: float = 0.1,
-        normalization: str = "layernorm",
-    ) -> None:
-
+    ):
         super().__init__()
 
-        self._hidden_dim = hidden_dim
-        self._num_heads = num_heads
+        self.hidden_dim = hidden_dim
+        self.num_modes = num_modes
 
-        ###############################################################
-        # Relative Embedding
-        ###############################################################
+        ###################################
+        # Temporal branch
+        ###################################
 
-        self.relative_embedding = RelativeEmbedding(
-            hidden_dim,
-        )
-
-        ###############################################################
-        # Agent Self Attention
-        ###############################################################
-
-        self.agent_attention = MultiHeadAttention(
+        self.temporal_self = TransformerBlock(
             hidden_dim,
             num_heads,
             dropout,
         )
 
-        ###############################################################
-        # Lane Self Attention
-        ###############################################################
+        ###################################
+        # Spatial branch
+        ###################################
 
-        self.lane_attention = MultiHeadAttention(
+        self.spatial_self = TransformerBlock(
             hidden_dim,
             num_heads,
             dropout,
         )
 
-        ###############################################################
+        ###################################
         # Cross Attention
-        ###############################################################
+        ###################################
 
-        self.cross_attention = MultiHeadAttention(
+        self.temporal_cross = nn.MultiheadAttention(
             hidden_dim,
             num_heads,
-            dropout,
-        )
-
-        self.norm = build_normalization(
-            normalization,
-            hidden_dim,
-        )
-
-        self.ffn = FeedForward(
-            hidden_dim,
             dropout=dropout,
-            normalization=normalization,
+            batch_first=True,
         )
 
-        ###########################################################################
-    # Forward
-    ###########################################################################
+        self.spatial_cross = nn.MultiheadAttention(
+            hidden_dim,
+            num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+
+        ###################################
+        # Learnable Queries
+        ###################################
+
+        self.query_embed = nn.Parameter(
+            torch.randn(num_modes, hidden_dim)
+        )
+
+        ###################################
+        # Query Attention
+        ###################################
+
+        self.query_temporal = nn.MultiheadAttention(
+            hidden_dim,
+            num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+
+        self.query_spatial = nn.MultiheadAttention(
+            hidden_dim,
+            num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+
+        self.norm_t = nn.LayerNorm(hidden_dim)
+        self.norm_s = nn.LayerNorm(hidden_dim)
 
     def forward(
         self,
-        agent_features: torch.Tensor,
-        lane_features: torch.Tensor,
-        positions: torch.Tensor,
-        headings: torch.Tensor,
-        agent_mask: torch.Tensor | None = None,
-        lane_mask: torch.Tensor | None = None,
+        agent_feat: torch.Tensor,
+        map_feat: torch.Tensor,
+        rel_feat: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        agent_feat : [N,H,D]
+        map_feat   : [M,D]
+        rel_feat   : [N,H,D]
 
-        #
-        # Relative embedding
-        #
-        # NOTE:
-        # The current implementation computes the embeddings so that
-        # they are available for graph-aware attention. The paper does
-        # not explicitly describe how they are injected into the
-        # attention scores, so this integration will be completed once
-        # the graph encoder is implemented.
-        #
+        Returns
+        -------
+        scene_embedding : [N,H,K,D]
+        """
 
-        _ = self.relative_embedding(
-            positions,
-            headings,
+        ####################################
+        # Fuse relative embedding
+        ####################################
+
+        temporal = agent_feat + rel_feat
+
+        spatial = map_feat.unsqueeze(0)
+
+        ####################################
+        # Temporal Self Attention
+        ####################################
+
+        temporal = self.temporal_self(temporal)
+
+        ####################################
+        # Spatial Self Attention
+        ####################################
+
+        spatial = self.spatial_self(spatial)
+
+        ####################################
+        # Cross Attention
+        ####################################
+
+        temporal2, _ = self.temporal_cross(
+            temporal,
+            spatial,
+            spatial,
         )
 
-        ###############################################################
-        # Agent Self Attention
-        ###############################################################
-
-        agents = self.agent_attention(
-            agent_features,
-            agent_features,
-            agent_features,
-            agent_mask,
+        temporal = self.norm_t(
+            temporal + temporal2
         )
 
-        ###############################################################
-        # Lane Self Attention
-        ###############################################################
-
-        lanes = self.lane_attention(
-            lane_features,
-            lane_features,
-            lane_features,
-            lane_mask,
+        spatial2, _ = self.spatial_cross(
+            spatial,
+            temporal,
+            temporal,
         )
 
-        ###############################################################
-        # Agent ← Lane Cross Attention
-        ###############################################################
-
-        fused = self.cross_attention(
-            agents,
-            lanes,
-            lanes,
-            None,
+        spatial = self.norm_s(
+            spatial + spatial2
         )
 
-        fused = fused + agents
+        ####################################
+        # Learnable Queries
+        ####################################
 
-        fused = self.norm(
-            fused,
+        N, H, D = temporal.shape
+
+        query = (
+            self.query_embed
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .expand(N, H, self.num_modes, D)
         )
 
-        fused = self.ffn(
-            fused,
+        query = query.reshape(
+            N * H,
+            self.num_modes,
+            D,
         )
 
-        return fused
-
-    def __repr__(
-        self,
-    ) -> str:
-
-        return (
-            "GSTA("
-            f"hidden_dim={self._hidden_dim}, "
-            f"num_heads={self._num_heads})"
+        temporal_memory = temporal.reshape(
+            N * H,
+            1,
+            D,
         )
 
+        spatial_memory = (
+            spatial.expand(
+                N * H,
+                spatial.shape[1],
+                D,
+            )
+        )
+
+        ####################################
+        # Query ← Temporal
+        ####################################
+
+        q_temporal, _ = self.query_temporal(
+            query,
+            temporal_memory,
+            temporal_memory,
+        )
+
+        ####################################
+        # Query ← Spatial
+        ####################################
+
+        q_spatial, _ = self.query_spatial(
+            query,
+            spatial_memory,
+            spatial_memory,
+        )
+
+        ####################################
+        # Equation (9)
+        ####################################
+
+        scene = q_temporal + q_spatial
+
+        scene = scene.reshape(
+            N,
+            H,
+            self.num_modes,
+            D,
+        )
+
+        return scene

@@ -1,186 +1,175 @@
 """
-Test GraphEncoder.
+scripts.test_scene_data
+
+Inspect one processed SceneData object.
+
+This script is used to verify that the preprocessing pipeline
+produces the expected data before batching.
 """
 
-import torch
+from datasets.argoverse_dataset import ArgoverseDataset
+from datasets.preprocess import ScenePreprocessor
+from datasets.scene_parser import SceneParser
 
-from models.encoders.graph_encoder import GraphEncoder
-from models.model_types import (
-    EncodedGraph,
-    GraphData,
-    RelativeFeatures,
-)
 
+###############################################################################
+# Temporary Dummy Map
+###############################################################################
+
+class DummyLaneSegment:
+
+    def __init__(self):
+
+        import numpy as np
+
+        self.centerline = np.array(
+            [
+                [0.0, 0.0],
+                [5.0, 0.0],
+                [10.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+
+        self.is_intersection = False
+        self.turn_direction = "NONE"
+        self.has_traffic_control = False
+
+
+class DummyMap:
+
+    def __init__(self):
+
+        self.city_lane_centerlines_dict = {
+            "MIA": {
+                0: DummyLaneSegment(),
+                1: DummyLaneSegment(),
+            },
+            "PIT": {
+                0: DummyLaneSegment(),
+                1: DummyLaneSegment(),
+            },
+        }
+
+    def get_lane_ids_in_xy_bbox(
+        self,
+        x,
+        y,
+        city,
+        query_search_range_manhattan=50.0,
+    ):
+        return [0, 1]
+
+
+###############################################################################
+# Main
+###############################################################################
 
 def main():
 
-    batch_size = 2
-    num_agents = 16
-    num_lanes = 32
-    hidden_dim = 256
+    print("=" * 80)
+    print("DSTNet SceneData Inspection")
+    print("=" * 80)
+    print()
 
-    ###########################################################################
-    # Relative Features
-    ###########################################################################
+    map_api = DummyMap()
 
-    relative = RelativeFeatures(
-        dx=torch.randn(
-            batch_size,
-            num_agents,
-            num_agents,
-        ),
-        dy=torch.randn(
-            batch_size,
-            num_agents,
-            num_agents,
-        ),
-        distance=torch.randn(
-            batch_size,
-            num_agents,
-            num_agents,
-        ),
-        heading_delta=torch.randn(
-            batch_size,
-            num_agents,
-            num_agents,
-        ),
-        embedding=torch.randn(
-            batch_size,
-            num_agents,
-            num_agents,
-            hidden_dim,
-        ),
+    parser = SceneParser(
+        map_api,
     )
 
-    ###########################################################################
-    # Graph
-    ###########################################################################
-
-    graph = GraphData(
-        adjacency=torch.randint(
-            0,
-            2,
-            (
-                batch_size,
-                num_agents,
-                num_agents,
-            ),
-        ).bool(),
-        edge_index=torch.randint(
-            0,
-            num_agents,
-            (
-                2,
-                128,
-            ),
-        ),
-        edge_features=relative,
-        agent_mask=None,
-        lane_mask=None,
+    preprocessor = ScenePreprocessor(
+        observation_steps=20,
+        prediction_steps=30,
+        lane_sample_points=20,
+        agent_radius=50.0,
+        lane_radius=50.0,
     )
 
-    ###########################################################################
-    # Features
-    ###########################################################################
-
-    agent_features = torch.randn(
-        batch_size,
-        num_agents,
-        hidden_dim,
+    dataset = ArgoverseDataset(
+        root="data/argoverse1/train",
+        parser=parser,
+        preprocessor=preprocessor,
     )
 
-    lane_features = torch.randn(
-        batch_size,
-        num_lanes,
-        hidden_dim,
-    )
+    print("Dataset Summary")
+    print(dataset.summary())
+    print()
 
-    ###########################################################################
-    # Graph Encoder
-    ###########################################################################
+    scene = dataset[0]
 
-    encoder = GraphEncoder()
+    print("=" * 80)
+    print("Scene Summary")
+    print("=" * 80)
 
-    encoded = encoder(
-        agent_features,
-        lane_features,
-        graph,
-    )
-
-    ###########################################################################
-    # Validation
-    ###########################################################################
-
-    assert isinstance(
-        encoded,
-        EncodedGraph,
-    )
-
-    assert encoded.agent_features.shape == (
-        batch_size,
-        num_agents,
-        hidden_dim,
-    )
-
-    assert encoded.lane_features.shape == (
-        batch_size,
-        num_lanes,
-        hidden_dim,
-    )
-
-    assert encoded.graph.adjacency.shape == (
-        batch_size,
-        num_agents,
-        num_agents,
-    )
-
-    assert encoded.graph.edge_index.shape[0] == 2
-
-    assert encoded.graph.edge_features.embedding.shape == (
-        batch_size,
-        num_agents,
-        num_agents,
-        hidden_dim,
-    )
+    print(scene)
+    print(scene.summary())
 
     print()
 
-    print("=" * 60)
-    print("GraphEncoder Test")
-    print("=" * 60)
+    print("=" * 80)
+    print("Agents")
+    print("=" * 80)
+
+    print(f"Total Agents : {scene.num_agents}")
+    print()
+
+    for idx, agent in enumerate(scene.agents):
+
+        print(
+            f"[{idx:02d}] "
+            f"Track={agent['track_id']:<8} "
+            f"Category={agent['category']:<8} "
+            f"Observed={agent['observed'].shape} "
+            f"Future={agent['future'].shape} "
+            f"Velocity={agent['velocity'].shape} "
+            f"Heading={agent['heading'].shape}"
+        )
 
     print()
 
-    print("Agent Features")
-    print(encoded.agent_features.shape)
+    print("=" * 80)
+    print("Lanes")
+    print("=" * 80)
+
+    print(f"Total Lanes : {scene.num_lanes}")
+    print()
+
+    for idx, lane in enumerate(scene.lanes):
+
+        print(
+            f"[{idx:02d}] "
+            f"Lane={lane['lane_id']} "
+            f"Centerline={lane['centerline'].shape} "
+            f"Direction={lane['direction'].shape}"
+        )
 
     print()
 
-    print("Lane Features")
-    print(encoded.lane_features.shape)
+    print("=" * 80)
+    print("Graph")
+    print("=" * 80)
 
-    print()
-
-    print("Adjacency")
-    print(encoded.graph.adjacency.shape)
-
-    print()
-
-    print("Edge Index")
-    print(encoded.graph.edge_index.shape)
-
-    print()
-
-    print("Relative Embedding")
     print(
-        encoded.graph.edge_features.embedding.shape
+        "Agent-Agent Edges :",
+        scene.graph.agent_agent_edges.shape,
+    )
+
+    print(
+        "Lane-Lane Edges  :",
+        scene.graph.lane_lane_edges.shape,
+    )
+
+    print(
+        "Lane-Agent Edges :",
+        scene.graph.lane_agent_edges.shape,
     )
 
     print()
 
-    print("✓ GraphEncoder test passed.")
-
-    print()
+    print("=" * 80)
+    print("Inspection Complete")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
