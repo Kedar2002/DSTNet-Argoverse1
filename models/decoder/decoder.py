@@ -16,6 +16,12 @@ from the mode-aware encoder features.
 
 The paper specifies a two-layer MLP decoder
 (Eq. 25) followed by confidence prediction.
+
+Implementation Notes
+--------------------
+This implementation follows the paper while adding
+a residual connection and LayerNorm around the shared
+MLP for improved optimization stability.
 """
 
 from __future__ import annotations
@@ -68,7 +74,15 @@ class Decoder(nn.Module):
         )
 
         #######################################################################
-        # Trajectory Head
+        # Decoder Normalization
+        #######################################################################
+
+        self.norm = nn.LayerNorm(
+            hidden_dim,
+        )
+
+        #######################################################################
+        # Trajectory Prediction
         #######################################################################
 
         self.trajectory_head = nn.Linear(
@@ -77,7 +91,7 @@ class Decoder(nn.Module):
         )
 
         #######################################################################
-        # Score Head
+        # Confidence Prediction
         #######################################################################
 
         self.score_head = nn.Linear(
@@ -85,6 +99,20 @@ class Decoder(nn.Module):
             1,
         )
 
+        #######################################################################
+        # Initialization
+        #######################################################################
+
+        nn.init.zeros_(
+            self.trajectory_head.bias,
+        )
+
+        nn.init.zeros_(
+            self.score_head.bias,
+        )
+
+    ###########################################################################
+    # Forward
     ###########################################################################
 
     def forward(
@@ -110,19 +138,33 @@ class Decoder(nn.Module):
                 "Expected shape (B,N,K,C)."
             )
 
-        B, N, K, _ = x.shape
+        B, N, K, C = x.shape
 
-        ###################################################################
-        # Shared decoder
-        ###################################################################
+        if C != self.hidden_dim:
+            raise ValueError(
+                f"Expected hidden dimension "
+                f"{self.hidden_dim}, got {C}."
+            )
+
+        #######################################################################
+        # Shared Decoder
+        #######################################################################
+
+        residual = x
 
         x = self.decoder(
             x,
         )
 
-        ###################################################################
-        # Coarse trajectories
-        ###################################################################
+        x = residual + x
+
+        x = self.norm(
+            x,
+        )
+
+        #######################################################################
+        # Trajectory Prediction
+        #######################################################################
 
         trajectories = self.trajectory_head(
             x,
@@ -136,23 +178,29 @@ class Decoder(nn.Module):
             2,
         )
 
-        ###################################################################
-        # Confidence
-        ###################################################################
+        #######################################################################
+        # Confidence Prediction
+        #######################################################################
 
         scores = self.score_head(
             x,
         )
 
         scores = scores.squeeze(
-            -1,
+            dim=-1,
         )
+
+        #######################################################################
+        # Output
+        #######################################################################
 
         return Prediction(
             trajectories=trajectories,
             scores=scores,
         )
 
+    ###########################################################################
+    # Representation
     ###########################################################################
 
     def __repr__(
@@ -161,5 +209,6 @@ class Decoder(nn.Module):
 
         return (
             "Decoder("
+            f"hidden_dim={self.hidden_dim}, "
             f"prediction_steps={self.prediction_steps})"
         )
