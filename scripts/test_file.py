@@ -1,96 +1,61 @@
 """
-scripts.test_mhca
+scripts.test_mmia
 
-Unit test for Multi-Head Cross Attention.
+Unit test for Multi-Modal Interaction Attention.
 """
 
 import torch
 
-from models.attention.mhca import MHCA
+from models.attention.mmia import MMIA
 
 
 def main():
 
     print("=" * 80)
-    print("MHCA Test")
+    print("MMIA Test")
     print("=" * 80)
 
     B = 2
-    Nq = 12
-    Nk = 20
+    N = 16
     C = 256
 
-    query = torch.randn(
+    spatial = torch.randn(
         B,
-        Nq,
+        N,
         C,
     )
 
-    context = torch.randn(
+    cross = torch.randn(
         B,
-        Nk,
+        N,
         C,
     )
 
-    mask = torch.ones(
-        B,
-        Nk,
-        dtype=torch.bool,
-    )
-
-    model = MHCA(
+    model = MMIA(
         hidden_dim=C,
-        num_heads=8,
     )
 
     print(model)
     print()
 
-    ###############################################################
-    # Forward
-    ###############################################################
-
     output = model(
-        query,
-        context,
-        context_mask=mask,
+        spatial,
+        cross,
     )
 
-    print("Query Shape  :", query.shape)
-    print("Context Shape:", context.shape)
-    print("Output Shape :", output.shape)
+    print("Spatial :", spatial.shape)
+    print("Cross   :", cross.shape)
+    print("Output  :", output.shape)
 
     assert output.shape == (
         B,
-        Nq,
+        N,
         C,
     )
 
-    ###############################################################
-    # Attention Weights
-    ###############################################################
-
-    output, weights = model(
-        query,
-        context,
-        context_mask=mask,
-        return_attention=True,
-    )
-
     print()
 
-    print("Attention Shape:", weights.shape)
-
-    assert weights.shape == (
-        B,
-        8,
-        Nq,
-        Nk,
-    )
-
-    print()
-
-    print("✓ MHCA test passed")
+    print("✓ MMIA test passed")
 
 
 if __name__ == "__main__":
