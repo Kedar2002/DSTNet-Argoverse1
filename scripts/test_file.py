@@ -1,87 +1,96 @@
 """
-scripts.test_mspa
+scripts.test_mhca
 
-Unit tests for the Multi-head Spatial Attention module.
+Unit test for Multi-Head Cross Attention.
 """
 
 import torch
 
-from models.attention.mspa import MSPA
+from models.attention.mhca import MHCA
 
 
 def main():
 
     print("=" * 80)
-    print("MSPA Test")
+    print("MHCA Test")
     print("=" * 80)
 
     B = 2
-    N = 16
+    Nq = 12
+    Nk = 20
     C = 256
 
-    x = torch.randn(
+    query = torch.randn(
         B,
-        N,
+        Nq,
+        C,
+    )
+
+    context = torch.randn(
+        B,
+        Nk,
         C,
     )
 
     mask = torch.ones(
         B,
-        N,
+        Nk,
         dtype=torch.bool,
     )
 
-    model = MSPA(
+    model = MHCA(
         hidden_dim=C,
         num_heads=8,
-        dropout=0.1,
     )
 
     print(model)
     print()
 
-    #######################################################################
+    ###############################################################
     # Forward
-    #######################################################################
+    ###############################################################
 
-    y = model(
-        x,
-        mask=mask,
+    output = model(
+        query,
+        context,
+        context_mask=mask,
     )
 
-    print("Input Shape :", x.shape)
-    print("Output Shape:", y.shape)
+    print("Query Shape  :", query.shape)
+    print("Context Shape:", context.shape)
+    print("Output Shape :", output.shape)
 
-    assert y.shape == (
+    assert output.shape == (
         B,
-        N,
+        Nq,
         C,
     )
 
-    #######################################################################
+    ###############################################################
     # Attention Weights
-    #######################################################################
+    ###############################################################
 
-    y, weights = model(
-        x,
-        mask=mask,
+    output, weights = model(
+        query,
+        context,
+        context_mask=mask,
         return_attention=True,
     )
 
     print()
 
-    print("Attention Shape :", weights.shape)
+    print("Attention Shape:", weights.shape)
 
     assert weights.shape == (
         B,
         8,
-        N,
-        N,
+        Nq,
+        Nk,
     )
 
     print()
 
-    print("✓ MSPA test passed")
+    print("✓ MHCA test passed")
 
 
 if __name__ == "__main__":
