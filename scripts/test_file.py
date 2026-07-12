@@ -1,52 +1,36 @@
 import torch
 
-from models.model_types import (
-    GraphData,
-    Prediction,
-    RefinedPrediction,
-    RelativeFeatures,
-)
+from models.encoders.lane_encoder import LaneEncoder
 
 
 def main():
 
-    relative = RelativeFeatures(
-        dx=torch.randn(2, 8, 8),
-        dy=torch.randn(2, 8, 8),
-        distance=torch.randn(2, 8, 8),
-        heading_delta=torch.randn(2, 8, 8),
-        embedding=torch.randn(2, 8, 8, 256),
+    model = LaneEncoder()
+
+    lanes = torch.randn(
+        2,      # batch
+        128,    # lanes
+        20,     # sampled points
+        2,
     )
 
-    graph = GraphData(
-        adjacency=torch.randint(0, 2, (2, 8, 8)),
-        edge_index=torch.randint(0, 8, (2, 32)),
-        edge_features=relative,
+    output = model(
+        lanes,
     )
 
-    prediction = Prediction(
-        trajectories=torch.randn(2, 6, 30, 2),
-        scores=torch.randn(2, 6),
-    )
-
-    refined = RefinedPrediction(
-        trajectories=torch.randn(2, 6, 30, 2),
-        scores=torch.randn(2, 6),
-    )
-
-    print(relative)
-
+    print(model)
     print()
 
-    print(graph)
+    print("Input :", lanes.shape)
+    print("Output:", output.shape)
 
-    print()
+    assert output.shape == (
+        2,
+        128,
+        256,
+    )
 
-    print(prediction)
-
-    print()
-
-    print(refined)
+    print("\nLaneEncoder test passed.")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ Generic multilayer perceptron used throughout DSTNet.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import torch
 from torch import nn
@@ -30,7 +30,7 @@ class MLP(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        hidden_dims: list[int],
+        hidden_dims: Sequence[int],
         output_dim: int,
         activation: Callable[[], nn.Module] = nn.ReLU,
         dropout: float = 0.0,
