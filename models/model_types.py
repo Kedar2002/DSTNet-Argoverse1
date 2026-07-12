@@ -103,3 +103,19 @@ class RefinedPrediction:
     scores: torch.Tensor
 
     offsets: torch.Tensor | None = None
+
+###############################################################################
+# Encoded Graph
+###############################################################################
+
+@dataclass(slots=True)
+class EncodedGraph:
+    """
+    Output of GraphEncoder.
+    """
+
+    agent_features: torch.Tensor
+
+    lane_features: torch.Tensor
+
+    graph: GraphData
