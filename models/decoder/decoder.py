@@ -12,7 +12,10 @@ The decoder predicts
     • K coarse trajectories
     • K confidence scores
 
-from the encoded motion features.
+from the mode-aware encoder features.
+
+The paper specifies a two-layer MLP decoder
+(Eq. 25) followed by confidence prediction.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import torch
 from torch import nn
 
 from models.layers.mlp import MLP
+from models.model_types import ModeFeatures
 from models.model_types import Prediction
 
 
@@ -30,9 +34,10 @@ class Decoder(nn.Module):
 
     Input
     -----
-        Encoded Features
+        ModeFeatures
 
-            (B,N,K,C)
+            features
+                (B,N,K,C)
 
     Output
     ------
@@ -43,7 +48,6 @@ class Decoder(nn.Module):
         self,
         hidden_dim: int = 256,
         prediction_steps: int = 30,
-        num_modes: int = 6,
         dropout: float = 0.1,
     ) -> None:
 
@@ -51,13 +55,12 @@ class Decoder(nn.Module):
 
         self.hidden_dim = hidden_dim
         self.prediction_steps = prediction_steps
-        self.num_modes = num_modes
 
         #######################################################################
         # Shared Decoder
         #######################################################################
 
-        self.shared = MLP(
+        self.decoder = MLP(
             input_dim=hidden_dim,
             hidden_dims=[hidden_dim],
             output_dim=hidden_dim,
@@ -65,7 +68,7 @@ class Decoder(nn.Module):
         )
 
         #######################################################################
-        # Trajectory Regression
+        # Trajectory Head
         #######################################################################
 
         self.trajectory_head = nn.Linear(
@@ -74,7 +77,7 @@ class Decoder(nn.Module):
         )
 
         #######################################################################
-        # Confidence Prediction
+        # Score Head
         #######################################################################
 
         self.score_head = nn.Linear(
@@ -86,29 +89,40 @@ class Decoder(nn.Module):
 
     def forward(
         self,
-        features: torch.Tensor,
+        mode_features: ModeFeatures,
     ) -> Prediction:
         """
         Parameters
         ----------
-        features
+        mode_features
 
-            (B,N,K,C)
+            Mode-aware encoder features.
 
         Returns
         -------
         Prediction
         """
 
-        B, N, K, _ = features.shape
+        x = mode_features.features
 
-        x = self.shared(
-            features,
+        if x.ndim != 4:
+            raise ValueError(
+                "Expected shape (B,N,K,C)."
+            )
+
+        B, N, K, _ = x.shape
+
+        ###################################################################
+        # Shared decoder
+        ###################################################################
+
+        x = self.decoder(
+            x,
         )
 
-        ###############################################################
-        # Trajectories
-        ###############################################################
+        ###################################################################
+        # Coarse trajectories
+        ###################################################################
 
         trajectories = self.trajectory_head(
             x,
@@ -122,13 +136,17 @@ class Decoder(nn.Module):
             2,
         )
 
-        ###############################################################
-        # Scores
-        ###############################################################
+        ###################################################################
+        # Confidence
+        ###################################################################
 
         scores = self.score_head(
             x,
-        ).squeeze(-1)
+        )
+
+        scores = scores.squeeze(
+            -1,
+        )
 
         return Prediction(
             trajectories=trajectories,
@@ -143,6 +161,5 @@ class Decoder(nn.Module):
 
         return (
             "Decoder("
-            f"prediction_steps={self.prediction_steps}, "
-            f"num_modes={self.num_modes})"
+            f"prediction_steps={self.prediction_steps})"
         )
