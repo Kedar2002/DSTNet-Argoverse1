@@ -859,7 +859,7 @@ class TriATM(nn.Module):
             query=spatial_features,
             key=spatial_features,
             value=spatial_features,
-            mask=lane_mask,
+            mask=agent_mask,
         )
 
         ###################################################################
