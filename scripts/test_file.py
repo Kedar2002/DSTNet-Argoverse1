@@ -1,30 +1,49 @@
 import torch
 
-from models.attention.mspa import MSPA
+from models.encoders.relative_embedding import RelativeEmbedding
 
 
 def main():
 
-    model = MSPA(
+    model = RelativeEmbedding(
         hidden_dim=256,
-        num_heads=8,
     )
 
-    x = torch.randn(
+    positions = torch.randn(
         2,
         32,
-        256,
+        2,
     )
 
-    y = model(x)
+    headings = torch.randn(
+        2,
+        32,
+    )
+
+    output = model(
+        positions,
+        headings,
+    )
 
     print(model)
 
     print()
 
-    print("Input :", x.shape)
+    print("Positions")
 
-    print("Output:", y.shape)
+    print(positions.shape)
+
+    print()
+
+    print("Headings")
+
+    print(headings.shape)
+
+    print()
+
+    print("Embedding")
+
+    print(output.shape)
 
 
 if __name__ == "__main__":
