@@ -1,19 +1,18 @@
 import torch
 
-from models.layers.feed_forward import FeedForward
+from models.attention.mspa import MSPA
 
 
 def main():
 
-    model = FeedForward(
+    model = MSPA(
         hidden_dim=256,
-        expansion=4,
-        dropout=0.1,
+        num_heads=8,
     )
 
     x = torch.randn(
-        8,
-        20,
+        2,
+        32,
         256,
     )
 
@@ -23,15 +22,9 @@ def main():
 
     print()
 
-    print("Input")
+    print("Input :", x.shape)
 
-    print(x.shape)
-
-    print()
-
-    print("Output")
-
-    print(y.shape)
+    print("Output:", y.shape)
 
 
 if __name__ == "__main__":
