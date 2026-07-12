@@ -351,7 +351,9 @@ class MSPA(nn.Module):
         residual = features
 
         if positions.ndim != 3:
-            raise ValueError(...)
+            raise ValueError(
+                "positions must have shape (B,N,2)."
+            )
 
         #######################################################################
         # QKV
@@ -444,8 +446,12 @@ class MSPA(nn.Module):
             2,
         )
 
+        B, N, _ = features.shape
+
         output = output.reshape(
-            features.shape,
+            B,
+            N,
+            self.hidden_dim,
         )
 
         output = self.out_proj(

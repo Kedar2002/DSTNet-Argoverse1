@@ -119,3 +119,19 @@ class EncodedGraph:
     lane_features: torch.Tensor
 
     graph: GraphData
+
+###############################################################################
+# Mode Features
+###############################################################################
+
+@dataclass(slots=True)
+class ModeFeatures:
+    """
+    Mode-aware encoder output.
+
+    Shape
+    -----
+    features : (B,N,K,C)
+    """
+
+    features: torch.Tensor
