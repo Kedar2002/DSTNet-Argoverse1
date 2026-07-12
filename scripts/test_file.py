@@ -1,20 +1,37 @@
 """
-scripts.test_scene_data
+scripts.test_collate
 
-Inspect one processed SceneData object.
+Integration test for the complete batching pipeline.
 
-This script is used to verify that the preprocessing pipeline
-produces the expected data before batching.
+Pipeline
+
+CSV
+    ↓
+SceneParser
+    ↓
+ScenePreprocessor
+    ↓
+SceneData
+    ↓
+DataLoader
+    ↓
+collate_fn
 """
 
+from __future__ import annotations
+
+from torch.utils.data import DataLoader
+
 from datasets.argoverse_dataset import ArgoverseDataset
+from datasets.collate import collate_fn
 from datasets.preprocess import ScenePreprocessor
 from datasets.scene_parser import SceneParser
 
 
 ###############################################################################
-# Temporary Dummy Map
+# Dummy Map
 ###############################################################################
+
 
 class DummyLaneSegment:
 
@@ -41,11 +58,11 @@ class DummyMap:
     def __init__(self):
 
         self.city_lane_centerlines_dict = {
-            "MIA": {
+            "PIT": {
                 0: DummyLaneSegment(),
                 1: DummyLaneSegment(),
             },
-            "PIT": {
+            "MIA": {
                 0: DummyLaneSegment(),
                 1: DummyLaneSegment(),
             },
@@ -58,6 +75,7 @@ class DummyMap:
         city,
         query_search_range_manhattan=50.0,
     ):
+
         return [0, 1]
 
 
@@ -65,17 +83,20 @@ class DummyMap:
 # Main
 ###############################################################################
 
+
 def main():
 
     print("=" * 80)
-    print("DSTNet SceneData Inspection")
+    print("DSTNet Collate Test")
     print("=" * 80)
     print()
 
-    map_api = DummyMap()
+    ###########################################################################
+    # Build dataset
+    ###########################################################################
 
     parser = SceneParser(
-        map_api,
+        DummyMap(),
     )
 
     preprocessor = ScenePreprocessor(
@@ -92,84 +113,127 @@ def main():
         preprocessor=preprocessor,
     )
 
-    print("Dataset Summary")
-    print(dataset.summary())
+    print(dataset)
     print()
 
-    scene = dataset[0]
+    ###########################################################################
+    # DataLoader
+    ###########################################################################
+
+    loader = DataLoader(
+        dataset,
+        batch_size=2,
+        shuffle=False,
+        collate_fn=collate_fn,
+    )
+
+    batch = next(iter(loader))
+
+    ###########################################################################
+    # Metadata
+    ###########################################################################
 
     print("=" * 80)
-    print("Scene Summary")
+    print("Metadata")
     print("=" * 80)
 
-    print(scene)
-    print(scene.summary())
+    print("Sequence IDs :", batch["metadata"]["sequence_id"])
+    print("Cities       :", batch["metadata"]["city"])
+    print("Origin Shape :", batch["metadata"]["origin"].shape)
+    print("Heading Shape:", batch["metadata"]["heading"].shape)
+
+    ###########################################################################
+    # Agents
+    ###########################################################################
 
     print()
-
     print("=" * 80)
-    print("Agents")
+    print("Agent Tensors")
     print("=" * 80)
 
-    print(f"Total Agents : {scene.num_agents}")
+    for key, value in batch["agents"].items():
+
+        print(f"{key:<20} {tuple(value.shape)}")
+
+    ###########################################################################
+    # Lanes
+    ###########################################################################
+
     print()
+    print("=" * 80)
+    print("Lane Tensors")
+    print("=" * 80)
 
-    for idx, agent in enumerate(scene.agents):
+    for key, value in batch["lanes"].items():
+
+        print(f"{key:<20} {tuple(value.shape)}")
+
+    ###########################################################################
+    # Graphs
+    ###########################################################################
+
+    print()
+    print("=" * 80)
+    print("Graphs")
+    print("=" * 80)
+
+    print("Scenes :", len(batch["graphs"]))
+
+    for i, graph in enumerate(batch["graphs"]):
+
+        print()
+
+        print(f"Scene {i}")
 
         print(
-            f"[{idx:02d}] "
-            f"Track={agent['track_id']:<8} "
-            f"Category={agent['category']:<8} "
-            f"Observed={agent['observed'].shape} "
-            f"Future={agent['future'].shape} "
-            f"Velocity={agent['velocity'].shape} "
-            f"Heading={agent['heading'].shape}"
+            "  Agent-Agent :",
+            graph.agent_agent_edges.shape,
         )
-
-    print()
-
-    print("=" * 80)
-    print("Lanes")
-    print("=" * 80)
-
-    print(f"Total Lanes : {scene.num_lanes}")
-    print()
-
-    for idx, lane in enumerate(scene.lanes):
 
         print(
-            f"[{idx:02d}] "
-            f"Lane={lane['lane_id']} "
-            f"Centerline={lane['centerline'].shape} "
-            f"Direction={lane['direction'].shape}"
+            "  Lane-Lane  :",
+            graph.lane_lane_edges.shape,
         )
 
-    print()
+        print(
+            "  Lane-Agent :",
+            graph.lane_agent_edges.shape,
+        )
 
-    print("=" * 80)
-    print("Graph")
-    print("=" * 80)
-
-    print(
-        "Agent-Agent Edges :",
-        scene.graph.agent_agent_edges.shape,
-    )
-
-    print(
-        "Lane-Lane Edges  :",
-        scene.graph.lane_lane_edges.shape,
-    )
-
-    print(
-        "Lane-Agent Edges :",
-        scene.graph.lane_agent_edges.shape,
-    )
+    ###########################################################################
+    # Assertions
+    ###########################################################################
 
     print()
+    print("=" * 80)
+    print("Running Assertions")
+    print("=" * 80)
 
+    assert batch["agents"]["observed"].ndim == 4
+    assert batch["agents"]["future"].ndim == 4
+    assert batch["agents"]["velocity"].ndim == 4
+    assert batch["agents"]["acceleration"].ndim == 4
+
+    assert batch["agents"]["heading"].ndim == 3
+    assert batch["agents"]["speed"].ndim == 3
+
+    assert batch["agents"]["observed_mask"].ndim == 3
+    assert batch["agents"]["future_mask"].ndim == 3
+    assert batch["agents"]["agent_mask"].ndim == 2
+
+    assert batch["lanes"]["centerline"].ndim == 4
+    assert batch["lanes"]["direction"].ndim == 4
+    assert batch["lanes"]["mask"].ndim == 2
+
+    print("✓ Tensor dimensions verified.")
+
+    ###########################################################################
+
+    print()
     print("=" * 80)
-    print("Inspection Complete")
+    print("Collate Test Passed")
     print("=" * 80)
+    print()
 
 
 if __name__ == "__main__":

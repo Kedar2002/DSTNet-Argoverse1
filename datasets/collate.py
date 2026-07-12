@@ -126,80 +126,263 @@ def _collate_metadata(
 
 
 ###############################################################################
-# Agents
+# Agent Features
 ###############################################################################
+
+
+def _pad_sequence(
+    sequence: np.ndarray,
+    target_length: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Pad one variable-length sequence.
+
+    Parameters
+    ----------
+    sequence
+        Shape (T, ...)
+
+    target_length
+        Desired temporal length.
+
+    Returns
+    -------
+    padded
+        Shape (target_length, ...)
+
+    mask
+        Shape (target_length,)
+    """
+
+    feature_shape = sequence.shape[1:]
+
+    padded = np.zeros(
+        (target_length, *feature_shape),
+        dtype=sequence.dtype,
+    )
+
+    mask = np.zeros(
+        target_length,
+        dtype=bool,
+    )
+
+    length = min(
+        len(sequence),
+        target_length,
+    )
+
+    if length > 0:
+
+        padded[:length] = sequence[:length]
+
+        mask[:length] = True
+
+    return padded, mask
 
 
 def _collate_agents(
     batch: list[SceneData],
 ) -> dict[str, torch.Tensor]:
 
-    observed = [
-        np.stack(
-            [
-                agent["observed"]
-                for agent in scene.agents
-            ]
-        )
+    max_agents = max(
+        scene.num_agents
         for scene in batch
-    ]
+    )
 
-    future = [
-        np.stack(
-            [
-                agent["future"]
-                for agent in scene.agents
-            ]
-        )
-        for scene in batch
-    ]
+    batch_size = len(batch)
 
-    velocity = [
-        np.stack(
-            [
-                agent["velocity"]
-                for agent in scene.agents
-            ]
-        )
-        for scene in batch
-    ]
+    observed = np.zeros(
+        (
+            batch_size,
+            max_agents,
+            20,
+            2,
+        ),
+        dtype=np.float32,
+    )
 
-    heading = [
-        np.stack(
-            [
-                agent["heading"]
-                for agent in scene.agents
-            ]
-        )
-        for scene in batch
-    ]
+    observed_mask = np.zeros(
+        (
+            batch_size,
+            max_agents,
+            20,
+        ),
+        dtype=bool,
+    )
 
-    observed, mask = _pad_array(
+    future = np.zeros(
+        (
+            batch_size,
+            max_agents,
+            30,
+            2,
+        ),
+        dtype=np.float32,
+    )
+
+    future_mask = np.zeros(
+        (
+            batch_size,
+            max_agents,
+            30,
+        ),
+        dtype=bool,
+    )
+
+    velocity = np.zeros_like(
         observed,
-        observed[0].shape[1:],
     )
 
-    future, _ = _pad_array(
-        future,
-        future[0].shape[1:],
+    speed = np.zeros(
+        (
+            batch_size,
+            max_agents,
+            20,
+        ),
+        dtype=np.float32,
     )
 
-    velocity, _ = _pad_array(
-        velocity,
-        velocity[0].shape[1:],
+    acceleration = np.zeros_like(
+        observed,
     )
 
-    heading, _ = _pad_array(
-        heading,
-        heading[0].shape[1:],
+    heading = np.zeros(
+        (
+            batch_size,
+            max_agents,
+            20,
+        ),
+        dtype=np.float32,
     )
+
+    agent_mask = np.zeros(
+        (
+            batch_size,
+            max_agents,
+        ),
+        dtype=bool,
+    )
+
+    ###########################################################################
+
+    for batch_idx, scene in enumerate(batch):
+
+        for agent_idx, agent in enumerate(scene.agents):
+
+            obs, obs_mask = _pad_sequence(
+                agent["observed"],
+                20,
+            )
+
+            fut, fut_mask = _pad_sequence(
+                agent["future"],
+                30,
+            )
+
+            vel, _ = _pad_sequence(
+                agent["velocity"],
+                20,
+            )
+
+            spd, _ = _pad_sequence(
+                agent["speed"][:, None],
+                20,
+            )
+
+            acc, _ = _pad_sequence(
+                agent["acceleration"],
+                20,
+            )
+
+            hdg, _ = _pad_sequence(
+                agent["heading"][:, None],
+                20,
+            )
+
+            observed[
+                batch_idx,
+                agent_idx,
+            ] = obs
+
+            observed_mask[
+                batch_idx,
+                agent_idx,
+            ] = obs_mask
+
+            future[
+                batch_idx,
+                agent_idx,
+            ] = fut
+
+            future_mask[
+                batch_idx,
+                agent_idx,
+            ] = fut_mask
+
+            velocity[
+                batch_idx,
+                agent_idx,
+            ] = vel
+
+            speed[
+                batch_idx,
+                agent_idx,
+            ] = spd.squeeze(-1)
+
+            acceleration[
+                batch_idx,
+                agent_idx,
+            ] = acc
+
+            heading[
+                batch_idx,
+                agent_idx,
+            ] = hdg.squeeze(-1)
+
+            agent_mask[
+                batch_idx,
+                agent_idx,
+            ] = True
+
+    ###########################################################################
 
     return {
-        "observed": observed,
-        "future": future,
-        "velocity": velocity,
-        "heading": heading,
-        "mask": mask,
+
+        "observed": torch.from_numpy(
+            observed,
+        ),
+
+        "observed_mask": torch.from_numpy(
+            observed_mask,
+        ),
+
+        "future": torch.from_numpy(
+            future,
+        ),
+
+        "future_mask": torch.from_numpy(
+            future_mask,
+        ),
+
+        "velocity": torch.from_numpy(
+            velocity,
+        ),
+
+        "speed": torch.from_numpy(
+            speed,
+        ),
+
+        "acceleration": torch.from_numpy(
+            acceleration,
+        ),
+
+        "heading": torch.from_numpy(
+            heading,
+        ),
+
+        "agent_mask": torch.from_numpy(
+            agent_mask,
+        ),
     }
 
 
