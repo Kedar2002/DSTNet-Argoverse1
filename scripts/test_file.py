@@ -1,25 +1,28 @@
-import torch
+import torch.nn as nn
 
-from losses.proposal_loss import ProposalLoss
-from models.model_types import Prediction
-
-B = 2
-N = 16
-K = 6
-T = 30
-
-prediction = Prediction(
-    trajectories=torch.randn(B, N, K, T, 2),
-    scores=torch.randn(B, N, K),
+from engine.optimizer import (
+    build_optimizer,
+    optimizer_summary,
 )
 
-gt = torch.randn(B, N, T, 2)
 
-loss = ProposalLoss()
+model = nn.Sequential(
 
-value = loss(
-    prediction,
-    gt,
+    nn.Linear(32,64),
+
+    nn.LayerNorm(64),
+
+    nn.ReLU(),
+
+    nn.Linear(64,10),
+
 )
 
-print(value)
+optimizer = build_optimizer(
+    model=model,
+    optimizer="adamw",
+    learning_rate=1e-4,
+    weight_decay=1e-2,
+)
+
+print(optimizer_summary(optimizer))
