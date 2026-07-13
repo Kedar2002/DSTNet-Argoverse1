@@ -1,28 +1,41 @@
 import torch.nn as nn
 
-from engine.optimizer import (
-    build_optimizer,
-    optimizer_summary,
+from engine.optimizer import build_optimizer
+from engine.scheduler import (
+    build_scheduler,
 )
 
-
-model = nn.Sequential(
-
-    nn.Linear(32,64),
-
-    nn.LayerNorm(64),
-
-    nn.ReLU(),
-
-    nn.Linear(64,10),
-
+model = nn.Linear(
+    32,
+    16,
 )
 
 optimizer = build_optimizer(
-    model=model,
-    optimizer="adamw",
-    learning_rate=1e-4,
-    weight_decay=1e-2,
+    model,
 )
 
-print(optimizer_summary(optimizer))
+scheduler = build_scheduler(
+
+    optimizer,
+
+    scheduler="warmup_cosine",
+
+    total_steps=10000,
+
+    warmup_steps=1000,
+
+)
+
+print(scheduler)
+
+for i in range(5):
+
+    optimizer.step()
+
+    scheduler.step()
+
+    print(
+
+        optimizer.param_groups[0]["lr"]
+
+    )
