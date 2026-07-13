@@ -49,7 +49,7 @@ class RefinementLoss(nn.Module):
         self,
         prediction: RefinedPrediction,
         ground_truth: torch.Tensor,
-    ) -> torch.Tensor:
+    ):
 
         refined = prediction.trajectories
 
@@ -140,7 +140,12 @@ class RefinementLoss(nn.Module):
             * smoothness_loss
         )
 
-        return total
+        return {
+            "loss": total,
+            "regression": regression_loss,
+            "endpoint": endpoint_loss,
+            "smoothness": smoothness_loss,
+        }
 
     def __repr__(
         self,
