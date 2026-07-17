@@ -20,6 +20,10 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from engine.utils import (
+    move_to_device,
+)
+
 from evaluation.metrics import compute_metrics
 
 
@@ -41,37 +45,6 @@ class Evaluator:
 
         self.model.to(self.device)
 
-    ###########################################################################
-    # Device Transfer
-    ###########################################################################
-
-    def _to_device(
-        self,
-        batch: Any,
-    ) -> Any:
-
-        if isinstance(batch, torch.Tensor):
-
-            return batch.to(
-                self.device,
-                non_blocking=True,
-            )
-
-        if isinstance(batch, Mapping):
-
-            return {
-                key: self._to_device(value)
-                for key, value in batch.items()
-            }
-
-        if isinstance(batch, (list, tuple)):
-
-            return type(batch)(
-                self._to_device(value)
-                for value in batch
-            )
-
-        return batch
 
     ###########################################################################
     # Evaluation
@@ -90,7 +63,7 @@ class Evaluator:
 
         for batch in self.dataloader:
 
-            batch = self._to_device(batch)
+            batch = move_to_device(batch,self.device,)
 
             _, refined_prediction = self.model(
 

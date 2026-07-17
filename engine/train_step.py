@@ -19,6 +19,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from engine.utils import (
+    move_to_device,
+    validate_batch,
+)
 
 import torch
 from torch import nn
@@ -70,41 +74,6 @@ class TrainStep:
         self.device = torch.device(device)
 
     ###########################################################################
-    # Device Transfer
-    ###########################################################################
-
-    def _to_device(
-        self,
-        batch: Any,
-    ) -> Any:
-        """
-        Recursively move a batch to the target device.
-        """
-
-        if isinstance(batch, torch.Tensor):
-
-            return batch.to(
-                self.device,
-                non_blocking=True,
-            )
-
-        if isinstance(batch, Mapping):
-
-            return {
-                key: self._to_device(value)
-                for key, value in batch.items()
-            }
-
-        if isinstance(batch, (list, tuple)):
-
-            return type(batch)(
-                self._to_device(value)
-                for value in batch
-            )
-
-        return batch
-
-    ###########################################################################
     # Training Step
     ###########################################################################
 
@@ -128,29 +97,36 @@ class TrainStep:
 
         self.model.train()
 
-        batch = self._to_device(batch)
+        batch = move_to_device(
+            batch,
+            self.device,
+        )
 
         #######################################################################
         # Validate batch
         #######################################################################
 
-        required_keys = {
-            "agent_trajectories",
-            "lane_centerlines",
-            "positions",
-            "headings",
-            "graph",
-            "future_trajectories",
-        }
+        validate_batch(
 
-        missing = required_keys.difference(batch.keys())
+            batch,
 
-        if missing:
+            {
 
-            raise KeyError(
-                f"Batch is missing required keys: "
-                f"{sorted(missing)}"
-            )
+                "agent_trajectories",
+
+                "lane_centerlines",
+
+                "positions",
+
+                "headings",
+
+                "graph",
+
+                "future_trajectories",
+
+            },
+
+        )
 
         #######################################################################
         # Zero gradients
@@ -201,8 +177,9 @@ class TrainStep:
         if "loss" not in losses:
 
             raise KeyError(
-                "Criterion must return a dictionary "
-                "containing key 'loss'."
+                "TotalLoss must return a dictionary "
+                "containing a scalar tensor under the "
+                "'loss' key."
             )
 
         total_loss = losses["loss"]
