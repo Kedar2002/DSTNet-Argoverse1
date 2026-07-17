@@ -3,11 +3,22 @@ datasets.collate
 
 Batch collation for DSTNet.
 
-Converts SceneData objects into batched tensors.
+Converts SceneData objects into batched tensors suitable for the
+DSTNet model.
 
-Unlike the initial implementation, this version batches
-ALL agents and ALL lanes, creating padding masks that
-the attention modules can consume.
+Output Batch
+------------
+{
+    "agent_trajectories": (B,N,Tobs,2)
+    "future_trajectories": (B,N,Tpred,2)
+    "lane_centerlines": (B,L,P,2)
+    "positions": (B,N,2)
+    "headings": (B,N)
+    "graph": list[GraphData]
+    "agent_mask": (B,N)
+    "lane_mask": (B,L)
+    "metadata": dict
+}
 """
 
 from __future__ import annotations
@@ -17,18 +28,32 @@ from typing import Any
 import numpy as np
 import torch
 
+from datasets.graph_builder import GraphData
 from datasets.scene_data import SceneData
 
+###############################################################################
+# Constants
+###############################################################################
+
+OBSERVATION_STEPS = 20
+
+PREDICTION_STEPS = 30
+
+LANE_POINTS = 20
 
 ###############################################################################
-# Helpers
+# Tensor Helpers
 ###############################################################################
 
 
 def _to_tensor(
     array: np.ndarray,
+    *,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
+    """
+    Convert numpy array to torch tensor.
+    """
 
     return torch.as_tensor(
         array,
@@ -36,134 +61,40 @@ def _to_tensor(
     )
 
 
-def _pad_array(
-    arrays: list[np.ndarray],
-    pad_shape: tuple[int, ...],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Pad a list of arrays.
-
-    Returns
-    -------
-    tensor
-        (B, max_items, ...)
-
-    mask
-        (B, max_items)
-        True = valid
-    """
-
-    batch_size = len(arrays)
-
-    max_items = max(
-        array.shape[0]
-        for array in arrays
-    )
-
-    padded = torch.zeros(
-        (
-            batch_size,
-            max_items,
-            *pad_shape,
-        ),
-        dtype=torch.float32,
-    )
-
-    mask = torch.zeros(
-        (
-            batch_size,
-            max_items,
-        ),
-        dtype=torch.bool,
-    )
-
-    for i, array in enumerate(arrays):
-
-        length = array.shape[0]
-
-        padded[i, :length] = _to_tensor(array)
-
-        mask[i, :length] = True
-
-    return padded, mask
-
-
 ###############################################################################
-# Metadata
-###############################################################################
-
-
-def _collate_metadata(
-    batch: list[SceneData],
-) -> dict[str, Any]:
-
-    return {
-        "sequence_id": [
-            scene.sequence_id
-            for scene in batch
-        ],
-        "city": [
-            scene.city
-            for scene in batch
-        ],
-        "origin": torch.as_tensor(
-            np.stack(
-                [
-                    scene.origin
-                    for scene in batch
-                ]
-            ),
-            dtype=torch.float32,
-        ),
-        "heading": torch.tensor(
-            [
-                scene.heading
-                for scene in batch
-            ],
-            dtype=torch.float32,
-        ),
-    }
-
-
-###############################################################################
-# Agent Features
+# Padding Helpers
 ###############################################################################
 
 
 def _pad_sequence(
     sequence: np.ndarray,
     target_length: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> np.ndarray:
     """
-    Pad one variable-length sequence.
+    Pad one temporal sequence.
 
     Parameters
     ----------
     sequence
-        Shape (T, ...)
+        Shape (T,...)
 
     target_length
         Desired temporal length.
 
     Returns
     -------
-    padded
-        Shape (target_length, ...)
-
-    mask
-        Shape (target_length,)
+    ndarray
+        Shape (target_length,...)
     """
 
     feature_shape = sequence.shape[1:]
 
     padded = np.zeros(
-        (target_length, *feature_shape),
-        dtype=sequence.dtype,
-    )
-
-    mask = np.zeros(
-        target_length,
-        dtype=bool,
+        (
+            target_length,
+            *feature_shape,
+        ),
+        dtype=np.float32,
     )
 
     length = min(
@@ -175,262 +106,426 @@ def _pad_sequence(
 
         padded[:length] = sequence[:length]
 
-        mask[:length] = True
+    return padded
 
-    return padded, mask
+
+def _allocate_agent_arrays(
+    batch_size: int,
+    max_agents: int,
+) -> dict[str, np.ndarray]:
+    """
+    Allocate all batched agent arrays.
+    """
+
+    return {
+
+        "agent_trajectories": np.zeros(
+            (
+                batch_size,
+                max_agents,
+                OBSERVATION_STEPS,
+                2,
+            ),
+            dtype=np.float32,
+        ),
+
+        "future_trajectories": np.zeros(
+            (
+                batch_size,
+                max_agents,
+                PREDICTION_STEPS,
+                2,
+            ),
+            dtype=np.float32,
+        ),
+
+        "positions": np.zeros(
+            (
+                batch_size,
+                max_agents,
+                2,
+            ),
+            dtype=np.float32,
+        ),
+
+        "headings": np.zeros(
+            (
+                batch_size,
+                max_agents,
+            ),
+            dtype=np.float32,
+        ),
+
+        "agent_mask": np.zeros(
+            (
+                batch_size,
+                max_agents,
+            ),
+            dtype=bool,
+        ),
+    }
+
+
+def _allocate_lane_arrays(
+    batch_size: int,
+    max_lanes: int,
+) -> dict[str, np.ndarray]:
+    """
+    Allocate lane tensors.
+    """
+
+    return {
+
+        "lane_centerlines": np.zeros(
+            (
+                batch_size,
+                max_lanes,
+                LANE_POINTS,
+                2,
+            ),
+            dtype=np.float32,
+        ),
+
+        "lane_mask": np.zeros(
+            (
+                batch_size,
+                max_lanes,
+            ),
+            dtype=bool,
+        ),
+    }
+
+
+###############################################################################
+# Metadata
+###############################################################################
+
+
+def _collate_metadata(
+    batch: list[SceneData],
+) -> dict[str, Any]:
+    """
+    Batch scene metadata.
+    """
+
+    return {
+
+        "sequence_ids": [
+
+            scene.sequence_id
+
+            for scene in batch
+
+        ],
+
+        "cities": [
+
+            scene.city
+
+            for scene in batch
+
+        ],
+
+        "origins": torch.tensor(
+
+            np.stack(
+
+                [
+
+                    scene.origin
+
+                    for scene in batch
+
+                ]
+
+            ),
+
+            dtype=torch.float32,
+
+        ),
+
+        "scene_headings": torch.tensor(
+
+            [
+
+                scene.heading
+
+                for scene in batch
+
+            ],
+
+            dtype=torch.float32,
+
+        ),
+
+    }
+
+###############################################################################
+# Agent Collation
+###############################################################################
 
 
 def _collate_agents(
     batch: list[SceneData],
 ) -> dict[str, torch.Tensor]:
+    """
+    Collate agent features.
+
+    Returns
+    -------
+    {
+        "agent_trajectories": (B,N,Tobs,2)
+        "future_trajectories": (B,N,Tpred,2)
+        "positions": (B,N,2)
+        "headings": (B,N)
+        "agent_mask": (B,N)
+    }
+    """
+
+    batch_size = len(batch)
 
     max_agents = max(
         scene.num_agents
         for scene in batch
     )
 
-    batch_size = len(batch)
-
-    observed = np.zeros(
-        (
-            batch_size,
-            max_agents,
-            20,
-            2,
-        ),
-        dtype=np.float32,
-    )
-
-    observed_mask = np.zeros(
-        (
-            batch_size,
-            max_agents,
-            20,
-        ),
-        dtype=bool,
-    )
-
-    future = np.zeros(
-        (
-            batch_size,
-            max_agents,
-            30,
-            2,
-        ),
-        dtype=np.float32,
-    )
-
-    future_mask = np.zeros(
-        (
-            batch_size,
-            max_agents,
-            30,
-        ),
-        dtype=bool,
-    )
-
-    velocity = np.zeros_like(
-        observed,
-    )
-
-    speed = np.zeros(
-        (
-            batch_size,
-            max_agents,
-            20,
-        ),
-        dtype=np.float32,
-    )
-
-    acceleration = np.zeros_like(
-        observed,
-    )
-
-    heading = np.zeros(
-        (
-            batch_size,
-            max_agents,
-            20,
-        ),
-        dtype=np.float32,
-    )
-
-    agent_mask = np.zeros(
-        (
-            batch_size,
-            max_agents,
-        ),
-        dtype=bool,
+    arrays = _allocate_agent_arrays(
+        batch_size=batch_size,
+        max_agents=max_agents,
     )
 
     ###########################################################################
+    # Populate arrays
+    ###########################################################################
 
-    for batch_idx, scene in enumerate(batch):
+    for batch_index, scene in enumerate(batch):
 
-        for agent_idx, agent in enumerate(scene.agents):
+        for agent_index, agent in enumerate(scene.agents):
 
-            obs, obs_mask = _pad_sequence(
+            ###################################################################
+            # Observed trajectory
+            ###################################################################
+
+            observed = _pad_sequence(
                 agent["observed"],
-                20,
+                OBSERVATION_STEPS,
             )
 
-            fut, fut_mask = _pad_sequence(
+            arrays["agent_trajectories"][
+                batch_index,
+                agent_index,
+            ] = observed
+
+            ###################################################################
+            # Future trajectory
+            ###################################################################
+
+            future = _pad_sequence(
                 agent["future"],
-                30,
+                PREDICTION_STEPS,
             )
 
-            vel, _ = _pad_sequence(
-                agent["velocity"],
-                20,
-            )
+            arrays["future_trajectories"][
+                batch_index,
+                agent_index,
+            ] = future
 
-            spd, _ = _pad_sequence(
-                agent["speed"][:, None],
-                20,
-            )
+            ###################################################################
+            # Current position
+            #
+            # Last observed position in local coordinates.
+            ###################################################################
 
-            acc, _ = _pad_sequence(
-                agent["acceleration"],
-                20,
-            )
+            arrays["positions"][
+                batch_index,
+                agent_index,
+            ] = observed[
+                OBSERVATION_STEPS - 1
+            ]
 
-            hdg, _ = _pad_sequence(
-                agent["heading"][:, None],
-                20,
-            )
+            ###################################################################
+            # Current heading
+            #
+            # Last observed heading.
+            ###################################################################
 
-            observed[
-                batch_idx,
-                agent_idx,
-            ] = obs
+            headings = agent["heading"]
 
-            observed_mask[
-                batch_idx,
-                agent_idx,
-            ] = obs_mask
+            if len(headings):
 
-            future[
-                batch_idx,
-                agent_idx,
-            ] = fut
+                arrays["headings"][
+                    batch_index,
+                    agent_index,
+                ] = float(
+                    headings[-1]
+                )
 
-            future_mask[
-                batch_idx,
-                agent_idx,
-            ] = fut_mask
+            ###################################################################
+            # Valid agent mask
+            ###################################################################
 
-            velocity[
-                batch_idx,
-                agent_idx,
-            ] = vel
-
-            speed[
-                batch_idx,
-                agent_idx,
-            ] = spd.squeeze(-1)
-
-            acceleration[
-                batch_idx,
-                agent_idx,
-            ] = acc
-
-            heading[
-                batch_idx,
-                agent_idx,
-            ] = hdg.squeeze(-1)
-
-            agent_mask[
-                batch_idx,
-                agent_idx,
+            arrays["agent_mask"][
+                batch_index,
+                agent_index,
             ] = True
 
+    ###########################################################################
+    # Convert to tensors
     ###########################################################################
 
     return {
 
-        "observed": torch.from_numpy(
-            observed,
+        "agent_trajectories": _to_tensor(
+            arrays["agent_trajectories"],
         ),
 
-        "observed_mask": torch.from_numpy(
-            observed_mask,
+        "future_trajectories": _to_tensor(
+            arrays["future_trajectories"],
         ),
 
-        "future": torch.from_numpy(
-            future,
+        "positions": _to_tensor(
+            arrays["positions"],
         ),
 
-        "future_mask": torch.from_numpy(
-            future_mask,
+        "headings": _to_tensor(
+            arrays["headings"],
         ),
 
-        "velocity": torch.from_numpy(
-            velocity,
+        "agent_mask": torch.as_tensor(
+            arrays["agent_mask"],
+            dtype=torch.bool,
         ),
 
-        "speed": torch.from_numpy(
-            speed,
-        ),
-
-        "acceleration": torch.from_numpy(
-            acceleration,
-        ),
-
-        "heading": torch.from_numpy(
-            heading,
-        ),
-
-        "agent_mask": torch.from_numpy(
-            agent_mask,
-        ),
     }
 
-
 ###############################################################################
-# Lanes
+# Lane Collation
 ###############################################################################
 
 
 def _collate_lanes(
     batch: list[SceneData],
 ) -> dict[str, torch.Tensor]:
+    """
+    Collate lane centerlines.
 
-    centerlines = [
-        np.stack(
-            [
-                lane["centerline"]
-                for lane in scene.lanes
-            ]
-        )
+    Returns
+    -------
+    {
+        "lane_centerlines": (B,L,P,2)
+        "lane_mask": (B,L)
+    }
+    """
+
+    batch_size = len(batch)
+
+    max_lanes = max(
+        scene.num_lanes
         for scene in batch
-    ]
-
-    directions = [
-        np.stack(
-            [
-                lane["direction"]
-                for lane in scene.lanes
-            ]
-        )
-        for scene in batch
-    ]
-
-    centerlines, mask = _pad_array(
-        centerlines,
-        centerlines[0].shape[1:],
     )
 
-    directions, _ = _pad_array(
-        directions,
-        directions[0].shape[1:],
+    arrays = _allocate_lane_arrays(
+        batch_size=batch_size,
+        max_lanes=max_lanes,
     )
+
+    ###########################################################################
+    # Populate lane tensors
+    ###########################################################################
+
+    for batch_index, scene in enumerate(batch):
+
+        for lane_index, lane in enumerate(scene.lanes):
+
+            centerline = _pad_sequence(
+                lane["centerline"],
+                LANE_POINTS,
+            )
+
+            arrays["lane_centerlines"][
+                batch_index,
+                lane_index,
+            ] = centerline
+
+            arrays["lane_mask"][
+                batch_index,
+                lane_index,
+            ] = True
+
+    ###########################################################################
+    # Convert to tensors
+    ###########################################################################
 
     return {
-        "centerline": centerlines,
-        "direction": directions,
-        "mask": mask,
+
+        "lane_centerlines": _to_tensor(
+            arrays["lane_centerlines"],
+        ),
+
+        "lane_mask": torch.as_tensor(
+            arrays["lane_mask"],
+            dtype=torch.bool,
+        ),
+
     }
 
+
+###############################################################################
+# Graph Collation
+###############################################################################
+
+
+def _collate_graphs(
+    batch: list[SceneData],
+) -> list[GraphData]:
+    """
+    Collect graph objects.
+
+    GraphData instances contain variable-sized graph
+    connectivity information, so they are kept as a list.
+    """
+
+    return [
+
+        scene.graph
+
+        for scene in batch
+
+    ]
+
+
+###############################################################################
+# Validation
+###############################################################################
+
+
+def _validate_batch(
+    batch: list[SceneData],
+) -> None:
+    """
+    Validate input batch.
+    """
+
+    if len(batch) == 0:
+
+        raise ValueError(
+            "Received an empty batch."
+        )
+
+    for scene in batch:
+
+        if not isinstance(
+            scene,
+            SceneData,
+        ):
+
+            raise TypeError(
+
+                "collate_fn expects "
+
+                "SceneData objects."
+
+            )
 
 ###############################################################################
 # Public API
@@ -440,13 +535,112 @@ def _collate_lanes(
 def collate_fn(
     batch: list[SceneData],
 ) -> dict[str, Any]:
+    """
+    Collate a batch of SceneData objects into the tensor format expected
+    by DSTNet.
 
-    return {
-        "metadata": _collate_metadata(batch),
-        "agents": _collate_agents(batch),
-        "lanes": _collate_lanes(batch),
-        "graphs": [
-            scene.graph
-            for scene in batch
-        ],
+    Returned dictionary
+    -------------------
+
+    {
+        "agent_trajectories": (B,N,Tobs,2)
+
+        "future_trajectories": (B,N,Tpred,2)
+
+        "lane_centerlines": (B,L,P,2)
+
+        "positions": (B,N,2)
+
+        "headings": (B,N)
+
+        "graph": list[GraphData]
+
+        "agent_mask": (B,N)
+
+        "lane_mask": (B,L)
+
+        "metadata": dict
     }
+    """
+
+    ###########################################################################
+    # Validation
+    ###########################################################################
+
+    _validate_batch(
+        batch,
+    )
+
+    ###########################################################################
+    # Individual components
+    ###########################################################################
+
+    metadata = _collate_metadata(
+        batch,
+    )
+
+    agents = _collate_agents(
+        batch,
+    )
+
+    lanes = _collate_lanes(
+        batch,
+    )
+
+    graphs = _collate_graphs(
+        batch,
+    )
+
+    ###########################################################################
+    # Assemble final batch
+    ###########################################################################
+
+    output = {
+
+        #######################################################################
+        # Model Inputs
+        #######################################################################
+
+        "agent_trajectories":
+            agents["agent_trajectories"],
+
+        "future_trajectories":
+            agents["future_trajectories"],
+
+        "lane_centerlines":
+            lanes["lane_centerlines"],
+
+        "positions":
+            agents["positions"],
+
+        "headings":
+            agents["headings"],
+
+        "graph":
+            graphs,
+
+        "agent_mask":
+            agents["agent_mask"],
+
+        "lane_mask":
+            lanes["lane_mask"],
+
+        #######################################################################
+        # Metadata
+        #######################################################################
+
+        "metadata":
+            metadata,
+    }
+
+    return output
+
+
+###############################################################################
+# Convenience Alias
+###############################################################################
+
+__all__ = [
+    "collate_fn",
+]
+
