@@ -1,8 +1,11 @@
 import torch.nn as nn
 
 from engine.optimizer import build_optimizer
-from engine.scheduler import (
-    build_scheduler,
+from engine.scheduler import build_scheduler
+
+from engine.checkpoint import (
+    save_checkpoint,
+    load_checkpoint,
 )
 
 model = nn.Linear(
@@ -15,27 +18,40 @@ optimizer = build_optimizer(
 )
 
 scheduler = build_scheduler(
-
     optimizer,
+    total_steps=100,
+)
 
-    scheduler="warmup_cosine",
+save_checkpoint(
 
-    total_steps=10000,
+    path="checkpoint_test.pth",
 
-    warmup_steps=1000,
+    model=model,
+
+    optimizer=optimizer,
+
+    scheduler=scheduler,
+
+    epoch=5,
+
+    global_step=200,
+
+    metrics={
+        "loss": 1.23,
+    },
 
 )
 
-print(scheduler)
+state = load_checkpoint(
 
-for i in range(5):
+    path="checkpoint_test.pth",
 
-    optimizer.step()
+    model=model,
 
-    scheduler.step()
+    optimizer=optimizer,
 
-    print(
+    scheduler=scheduler,
 
-        optimizer.param_groups[0]["lr"]
+)
 
-    )
+print(state)

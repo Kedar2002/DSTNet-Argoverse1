@@ -45,6 +45,7 @@ from models.refinement.refinement import Refinement
 
 from models.model_types import (
     ModeFeatures,
+    Prediction,
     RefinedPrediction,
 )
 
@@ -136,7 +137,10 @@ class DSTNet(nn.Module):
         graph,
         agent_mask: torch.Tensor | None = None,
         lane_mask: torch.Tensor | None = None,
-    ) -> RefinedPrediction:
+    ) -> tuple[
+        Prediction,
+        RefinedPrediction,
+    ]:
 
         ###############################################################
         # Local Encoders
@@ -177,10 +181,10 @@ class DSTNet(nn.Module):
         )
 
         ###############################################################
-        # Coarse Trajectory Decoder
+        # Coarse decoder
         ###############################################################
 
-        prediction = self.decoder(
+        coarse_prediction = self.decoder(
             mode_features,
         )
 
@@ -190,14 +194,17 @@ class DSTNet(nn.Module):
 
         refined_prediction = self.refinement(
             encoder_features=agent_features,
-            prediction=prediction,
+            prediction=coarse_prediction,
         )
 
         ###############################################################
-        # Output
+        # Return both predictions
         ###############################################################
 
-        return refined_prediction
+        return (
+            coarse_prediction,
+            refined_prediction,
+        )
 
     ###################################################################
     # Representation
