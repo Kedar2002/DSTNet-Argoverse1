@@ -32,6 +32,7 @@ SceneParser
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Iterator
 from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
@@ -1529,7 +1530,7 @@ class MapLoader:
 
     def __iter__(
         self,
-    ):
+    ) -> Iterator[VectorMap]:
         """
         Iterate over loaded VectorMaps.
         """
