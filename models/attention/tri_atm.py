@@ -16,6 +16,11 @@ MMIA
 Feed Forward
 """
 
+# TODO:
+# Replace radius-based neighbourhood construction with the
+# graph produced by datasets.GraphBuilder once graph attention
+# is fully integrated.
+
 from __future__ import annotations
 
 import math

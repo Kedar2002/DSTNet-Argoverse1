@@ -43,6 +43,8 @@ from models.decoder.decoder import Decoder
 
 from models.refinement.refinement import Refinement
 
+from datasets.graph_builder import GraphData
+
 from models.model_types import (
     ModeFeatures,
     Prediction,
@@ -134,7 +136,7 @@ class DSTNet(nn.Module):
         lane_centerlines: torch.Tensor,
         positions: torch.Tensor,
         headings: torch.Tensor,
-        graph,
+        graph: list[GraphData],
         agent_mask: torch.Tensor | None = None,
         lane_mask: torch.Tensor | None = None,
     ) -> tuple[
