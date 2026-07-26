@@ -833,16 +833,6 @@ class MapLoader:
             city,
         )
 
-        if lane is None:
-
-            raise KeyError(
-
-                f"Lane {lane_id} "
-
-                f"does not exist in {city}."
-
-            )
-
         return lane.centerline
 
     ###########################################################################
@@ -1301,12 +1291,6 @@ class MapLoader:
             lane_id,
             city,
         )
-
-        if lane is None:
-
-            raise KeyError(
-                f"Lane {lane_id} not found."
-            )
 
         return {
 
