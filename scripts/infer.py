@@ -983,50 +983,60 @@ def save_predictions(
     )
 
 ###############################################################################
-# Main
+# Reusable Inference Pipeline
 ###############################################################################
 
-def main() -> None:
+def run_inference_pipeline(
+    *,
+    scene_path: Path = DEFAULT_SCENE,
+    checkpoint: Path = DEFAULT_CHECKPOINT,
+    result_root: Path | None = None,
+):
+    """
+    Reusable production inference pipeline.
+    """
 
-    print_header(
-        "DSTNet Production Inference"
-    )
+    global RESULT_ROOT
 
-    ###########################################################################
-    # Create directories
-    ###########################################################################
+    if result_root is not None:
+
+        RESULT_ROOT = result_root
 
     create_directories()
 
     ###########################################################################
-    # Build model
+    # Model
     ###########################################################################
 
     model = build_model()
 
     ###########################################################################
-    # Load checkpoint
+    # Checkpoint
     ###########################################################################
 
     load_checkpoint(
+
         model,
+
+        checkpoint,
+
     )
 
     ###########################################################################
-    # Load scene
+    # Scene
     ###########################################################################
 
     batch, processed_scene = load_scene(
 
-        DEFAULT_SCENE,
+        scene_path,
 
     )
 
     ###########################################################################
-    # Run inference
+    # Forward
     ###########################################################################
 
-    coarse_prediction, refined_prediction, inference_time = (
+    _, refined_prediction, inference_time = (
 
         run_inference(
 
@@ -1039,7 +1049,7 @@ def main() -> None:
     )
 
     ###########################################################################
-    # Best prediction mode
+    # Best Mode
     ###########################################################################
 
     prediction = select_best_mode(
@@ -1049,7 +1059,7 @@ def main() -> None:
     )
 
     ###########################################################################
-    # Recover world coordinates
+    # Recover World Coordinates
     ###########################################################################
 
     prediction["trajectories"] = recover_world_coordinates(
@@ -1090,9 +1100,27 @@ def main() -> None:
 
     )
 
-    ###########################################################################
-    # Final
-    ###########################################################################
+    return prediction
+
+###############################################################################
+# Main
+###############################################################################
+
+def main() -> None:
+
+    print_header(
+        "DSTNet Production Inference"
+    )
+
+    run_inference_pipeline(
+
+        scene_path=DEFAULT_SCENE,
+
+        checkpoint=DEFAULT_CHECKPOINT,
+
+        result_root=RESULT_ROOT,
+
+    )
 
     print()
 

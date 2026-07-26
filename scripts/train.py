@@ -1143,6 +1143,395 @@ def validate_one_epoch(
     return metrics
 
 ###############################################################################
+# Reusable Training Pipeline
+###############################################################################
+
+def run_training(
+    *,
+    train_dataset,
+    val_dataset,
+    epochs: int = EPOCHS,
+    checkpoint_root: Path | None = None,
+    log_root: Path | None = None,
+):
+    """
+    Reusable training pipeline.
+
+    This contains the complete training logic previously implemented
+    inside main().
+
+    Parameters
+    ----------
+    train_dataset
+        Training dataset.
+
+    val_dataset
+        Validation dataset.
+
+    epochs
+        Number of training epochs.
+
+    checkpoint_root
+        Optional checkpoint directory override.
+
+    log_root
+        Optional log directory override.
+    """
+
+    global CHECKPOINT_ROOT
+    global LOG_ROOT
+    global LATEST_CHECKPOINT
+    global BEST_CHECKPOINT
+    global CSV_LOG
+    global EPOCHS
+
+    ###########################################################################
+    # Override runtime configuration
+    ###########################################################################
+
+    if checkpoint_root is not None:
+
+        CHECKPOINT_ROOT = checkpoint_root
+
+        LATEST_CHECKPOINT = (
+
+            CHECKPOINT_ROOT
+
+            / "latest.pth"
+
+        )
+
+        BEST_CHECKPOINT = (
+
+            CHECKPOINT_ROOT
+
+            / "best.pth"
+
+        )
+
+    if log_root is not None:
+
+        LOG_ROOT = log_root
+
+        CSV_LOG = (
+
+            LOG_ROOT
+
+            / "training_log.csv"
+
+        )
+
+    EPOCHS = epochs
+
+    ###########################################################################
+    # Directories
+    ###########################################################################
+
+    create_directories()
+
+    initialize_csv()
+
+    ###########################################################################
+    # DataLoaders
+    ###########################################################################
+
+    print_section(
+        "Building DataLoaders"
+    )
+
+    train_loader = build_dataloader(
+
+        train_dataset,
+
+        train=True,
+
+    )
+
+    val_loader = build_dataloader(
+
+        val_dataset,
+
+        train=False,
+
+    )
+
+    print(
+        f"Training Batches   : {len(train_loader):,}"
+    )
+
+    print(
+        f"Validation Batches : {len(val_loader):,}"
+    )
+
+    ###########################################################################
+    # Model
+    ###########################################################################
+
+    model = build_model()
+
+    ###########################################################################
+    # Optimizer / Scheduler / Loss
+    ###########################################################################
+
+    optimizer, scheduler, criterion = (
+
+        build_training_components(
+
+            model,
+
+            total_steps=len(train_loader),
+
+        )
+
+    )
+
+    ###########################################################################
+    # Resume
+    ###########################################################################
+
+    start_epoch, best_metric = load_checkpoint(
+
+        model,
+
+        optimizer,
+
+        scheduler,
+
+    )
+
+    ###########################################################################
+    # Training
+    ###########################################################################
+
+    print()
+
+    print("=" * 80)
+
+    print("Starting Training")
+
+    print("=" * 80)
+
+    training_start = time.perf_counter()
+
+    try:
+
+        for epoch in range(
+
+            start_epoch + 1,
+
+            epochs + 1,
+
+        ):
+
+            print()
+
+            print("=" * 80)
+
+            print(
+                f"Epoch {epoch}/{epochs}"
+            )
+
+            print("=" * 80)
+
+            epoch_start = time.perf_counter()
+
+            train_loss = train_one_epoch(
+
+                epoch=epoch,
+
+                model=model,
+
+                dataloader=train_loader,
+
+                optimizer=optimizer,
+
+                scheduler=scheduler,
+
+                criterion=criterion,
+
+            )
+
+            val_metrics = validate_one_epoch(
+
+                model=model,
+
+                dataloader=val_loader,
+
+            )
+
+            epoch_time = (
+
+                time.perf_counter()
+
+                - epoch_start
+
+            )
+
+            learning_rate = get_learning_rate(
+
+                optimizer,
+
+            )
+
+            append_csv(
+
+                epoch=epoch,
+
+                train_loss=train_loss,
+
+                metrics=val_metrics,
+
+                learning_rate=learning_rate,
+
+                epoch_time=epoch_time,
+
+            )
+
+            current_metric = val_metrics.get(
+
+                "minADE",
+
+                float("inf"),
+
+            )
+
+            is_best = (
+
+                current_metric
+
+                <
+
+                best_metric
+
+            )
+
+            if is_best:
+
+                best_metric = current_metric
+
+                print()
+
+                print(
+
+                    f"✓ New Best Model "
+
+                    f"(minADE={best_metric:.6f})"
+
+                )
+
+            if epoch % SAVE_EVERY == 0:
+
+                save_checkpoint(
+
+                    epoch=epoch,
+
+                    model=model,
+
+                    optimizer=optimizer,
+
+                    scheduler=scheduler,
+
+                    train_loss=train_loss,
+
+                    val_metrics=val_metrics,
+
+                    best=is_best,
+
+                )
+
+            print_epoch_summary(
+
+                epoch=epoch,
+
+                train_loss=train_loss,
+
+                metrics=val_metrics,
+
+                learning_rate=learning_rate,
+
+                epoch_time=epoch_time,
+
+            )
+
+    except KeyboardInterrupt:
+
+        print()
+
+        print("=" * 80)
+
+        print("Training Interrupted")
+
+        print("=" * 80)
+
+        save_checkpoint(
+
+            epoch=epoch,
+
+            model=model,
+
+            optimizer=optimizer,
+
+            scheduler=scheduler,
+
+            train_loss=train_loss,
+
+            val_metrics=val_metrics,
+
+            best=False,
+
+        )
+
+    total_training_time = (
+
+        time.perf_counter()
+
+        - training_start
+
+    )
+
+    print()
+
+    print("=" * 80)
+
+    print("Training Complete")
+
+    print("=" * 80)
+
+    print(
+
+        f"Best minADE : "
+
+        f"{best_metric:.6f}"
+
+    )
+
+    print(
+
+        f"Total Time  : "
+
+        f"{total_training_time / 3600:.2f} hours"
+
+    )
+
+    print()
+
+    print(
+
+        f"Checkpoints : "
+
+        f"{CHECKPOINT_ROOT}"
+
+    )
+
+    print(
+
+        f"Logs        : "
+
+        f"{CSV_LOG}"
+
+    )
+
+###############################################################################
 # Main
 ###############################################################################
 
@@ -1261,278 +1650,16 @@ def main() -> None:
     )
 
     ###########################################################################
-    # Training
+    # Run Training
     ###########################################################################
 
-    print()
+    run_training(
 
-    print("=" * 80)
+        train_dataset=train_dataset,
 
-    print("Starting Training")
+        val_dataset=val_dataset,
 
-    print("=" * 80)
-
-    training_start = time.perf_counter()
-
-    try:
-
-        for epoch in range(
-
-            start_epoch + 1,
-
-            EPOCHS + 1,
-
-        ):
-
-            print()
-
-            print("=" * 80)
-
-            print(
-                f"Epoch {epoch}/{EPOCHS}"
-            )
-
-            print("=" * 80)
-
-            epoch_start = time.perf_counter()
-
-            ###############################################################
-            # Train
-            ###############################################################
-
-            train_loss = train_one_epoch(
-
-                epoch=epoch,
-
-                model=model,
-
-                dataloader=train_loader,
-
-                optimizer=optimizer,
-
-                scheduler=scheduler,
-
-                criterion=criterion,
-
-            )
-
-            ###############################################################
-            # Validate
-            ###############################################################
-
-            val_metrics = validate_one_epoch(
-
-                model=model,
-
-                dataloader=val_loader,
-
-            )
-
-            ###############################################################
-            # Epoch time
-            ###############################################################
-
-            epoch_time = (
-
-                time.perf_counter()
-
-                - epoch_start
-
-            )
-
-            ###############################################################
-            # Learning rate
-            ###############################################################
-
-            learning_rate = get_learning_rate(
-
-                optimizer,
-
-            )
-
-            ###############################################################
-            # CSV log
-            ###############################################################
-
-            append_csv(
-
-                epoch=epoch,
-
-                train_loss=train_loss,
-
-                metrics=val_metrics,
-
-                learning_rate=learning_rate,
-
-                epoch_time=epoch_time,
-
-            )
-
-            ###############################################################
-            # Best model
-            ###############################################################
-
-            current_metric = val_metrics.get(
-
-                "minADE",
-
-                float("inf"),
-
-            )
-
-            is_best = (
-
-                current_metric
-
-                <
-
-                best_metric
-
-            )
-
-            if is_best:
-
-                best_metric = current_metric
-
-                print()
-
-                print(
-
-                    f"✓ New Best Model "
-
-                    f"(minADE={best_metric:.6f})"
-
-                )
-
-            ###############################################################
-            # Checkpoint
-            ###############################################################
-
-            if (
-
-                epoch % SAVE_EVERY == 0
-
-            ):
-
-                save_checkpoint(
-
-                    epoch=epoch,
-
-                    model=model,
-
-                    optimizer=optimizer,
-
-                    scheduler=scheduler,
-
-                    train_loss=train_loss,
-
-                    val_metrics=val_metrics,
-
-                    best=is_best,
-
-                )
-
-            ###############################################################
-            # Summary
-            ###############################################################
-
-            print_epoch_summary(
-
-                epoch=epoch,
-
-                train_loss=train_loss,
-
-                metrics=val_metrics,
-
-                learning_rate=learning_rate,
-
-                epoch_time=epoch_time,
-
-            )
-
-    ###########################################################################
-    # Interrupt
-    ###########################################################################
-
-    except KeyboardInterrupt:
-
-        print()
-
-        print("=" * 80)
-
-        print("Training Interrupted")
-
-        print("=" * 80)
-
-        save_checkpoint(
-
-            epoch=epoch,
-
-            model=model,
-
-            optimizer=optimizer,
-
-            scheduler=scheduler,
-
-            train_loss=train_loss,
-
-            val_metrics=val_metrics,
-
-            best=False,
-
-        )
-
-    ###########################################################################
-    # Final
-    ###########################################################################
-
-    total_training_time = (
-
-        time.perf_counter()
-
-        - training_start
-
-    )
-
-    print()
-
-    print("=" * 80)
-
-    print("Training Complete")
-
-    print("=" * 80)
-
-    print(
-
-        f"Best minADE : "
-
-        f"{best_metric:.6f}"
-
-    )
-
-    print(
-
-        f"Total Time  : "
-
-        f"{total_training_time / 3600:.2f} hours"
-
-    )
-
-    print()
-
-    print(
-
-        f"Checkpoints : "
-
-        f"{CHECKPOINT_ROOT}"
-
-    )
-
-    print(
-
-        f"Logs        : "
-
-        f"{CSV_LOG}"
+        epochs=EPOCHS,
 
     )
 
