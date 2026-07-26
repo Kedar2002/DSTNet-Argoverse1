@@ -140,6 +140,18 @@ class TotalLoss(nn.Module):
             * refinement_loss
         )
 
+        if torch.isnan(total_loss):
+            raise RuntimeError("Total loss became NaN.")
+
+        if torch.isinf(total_loss):
+            raise RuntimeError("Total loss became Inf.")
+
+        metrics = {
+            key: value
+            for key, value in refinement_metrics.items()
+            if key != "loss"
+        }
+
         return {
 
             "loss": total_loss,
@@ -152,7 +164,7 @@ class TotalLoss(nn.Module):
 
             "refinement_loss": refinement_loss,
 
-            **refinement_metrics,
+            **metrics,
         }
 
     def __repr__(
