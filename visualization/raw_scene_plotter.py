@@ -3,17 +3,15 @@ visualization.raw_scene_plotter
 
 Publication-quality visualization of an Argoverse 1 RawScene.
 
-Displays
-
-- HD lane centerlines
-- Target agent
-- Autonomous Vehicle (AV)
-- Other traffic participants
-- Observed trajectories
-- Future trajectories
+Features
+--------
+- Local HD map visualization
+- Nearby actor filtering
+- Target agent highlighting
+- Autonomous vehicle highlighting
 - Direction arrows
-
-Coordinates are shown in the original world frame.
+- Automatic scene cropping
+- Paper-style aesthetics
 """
 
 from __future__ import annotations
@@ -24,30 +22,32 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from datasets.raw_scene import (
+    RawLane,
     RawScene,
     RawTrack,
 )
 
 ###############################################################################
-# Plot Style
+# Appearance
 ###############################################################################
 
-LANE_COLOR = "#D6D6D6"
+LANE_COLOR = "#E6E6E6"
 
-TARGET_OBSERVED = "#0B7A75"      # teal
-TARGET_FUTURE = "#C62828"        # red
+TARGET_OBSERVED_COLOR = "#00897B"
 
-AV_COLOR = "#F4A641"
+TARGET_FUTURE_COLOR = "#D32F2F"
 
-VEHICLE_COLOR = "#707070"
+AV_COLOR = "#F39C12"
 
-PEDESTRIAN_COLOR = "#6AA84F"
+VEHICLE_COLOR = "#7A7A7A"
 
-CYCLIST_COLOR = "#D68910"
+PEDESTRIAN_COLOR = "#4CAF50"
 
-BUS_COLOR = "#7E57C2"
+CYCLIST_COLOR = "#8E44AD"
 
-UNKNOWN_COLOR = "#8A8A8A"
+BUS_COLOR = "#1565C0"
+
+UNKNOWN_COLOR = "#909090"
 
 ###############################################################################
 # Drawing Parameters
@@ -55,37 +55,167 @@ UNKNOWN_COLOR = "#8A8A8A"
 
 OBSERVED_STEPS = 20
 
-LANE_WIDTH = 0.8
+TARGET_WIDTH = 2.2
 
-TARGET_WIDTH = 2.8
+AV_WIDTH = 2.0
 
-AV_WIDTH = 2.2
+OTHER_WIDTH = 1.1
 
-OTHER_WIDTH = 1.2
+LANE_WIDTH = 0.65
 
-ARROW_EVERY = 4
+LANE_ALPHA = 0.95
 
-SCENE_MARGIN = 5.0
+OTHER_ALPHA = 0.65
+
+TARGET_ALPHA = 1.0
+
+ARROW_INTERVAL = 4
+
+ARROW_SCALE = 8
+
+LOCAL_RADIUS = 35.0
+
+SCENE_MARGIN = 4.0
 
 ###############################################################################
-# Utility
+# Utilities
+###############################################################################
+
+
+def target_position(
+    scene: RawScene,
+) -> np.ndarray:
+    """
+    Last observed target position.
+    """
+
+    target = scene.target_track
+
+    index = min(
+        OBSERVED_STEPS - 1,
+        len(target.positions) - 1,
+    )
+
+    return target.positions[index]
+
+
+###############################################################################
+# Nearby Filtering
+###############################################################################
+
+
+def nearby_tracks(
+    scene: RawScene,
+    radius: float = LOCAL_RADIUS,
+) -> list[RawTrack]:
+    """
+    Return only actors close to the target.
+
+    Target and AV are always included.
+    """
+
+    centre = target_position(scene)
+
+    selected: list[RawTrack] = []
+
+    for track in scene.tracks.values():
+
+        if track.is_target:
+
+            selected.append(track)
+
+            continue
+
+        if track.is_av:
+
+            selected.append(track)
+
+            continue
+
+        index = min(
+
+            OBSERVED_STEPS - 1,
+
+            len(track.positions) - 1,
+
+        )
+
+        distance = np.linalg.norm(
+
+            track.positions[index] - centre
+
+        )
+
+        if distance <= radius:
+
+            selected.append(track)
+
+    return selected
+
+
+def nearby_lanes(
+    scene: RawScene,
+    radius: float = LOCAL_RADIUS,
+) -> list[RawLane]:
+    """
+    Return lanes surrounding the target.
+    """
+
+    centre = target_position(scene)
+
+    selected: list[RawLane] = []
+
+    for lane in scene.lanes.values():
+
+        minimum_distance = np.min(
+
+            np.linalg.norm(
+
+                lane.centerline - centre,
+
+                axis=1,
+
+            )
+
+        )
+
+        if minimum_distance <= radius:
+
+            selected.append(lane)
+
+    return selected
+
+
+###############################################################################
+# Actor Appearance
 ###############################################################################
 
 
 def actor_colour(
     track: RawTrack,
-) -> str:
-    """
-    Return colour for an actor.
-    """
+) -> tuple[str, str]:
 
     if track.is_target:
-        return TARGET_OBSERVED
+
+        return (
+
+            TARGET_OBSERVED_COLOR,
+
+            TARGET_FUTURE_COLOR,
+
+        )
 
     if track.is_av:
-        return AV_COLOR
 
-    mapping = {
+        return (
+
+            AV_COLOR,
+
+            AV_COLOR,
+
+        )
+
+    colour = {
 
         "VEHICLE": VEHICLE_COLOR,
 
@@ -95,13 +225,19 @@ def actor_colour(
 
         "BUS": BUS_COLOR,
 
-    }
-
-    return mapping.get(
+    }.get(
 
         track.object_type.upper(),
 
         UNKNOWN_COLOR,
+
+    )
+
+    return (
+
+        colour,
+
+        colour,
 
     )
 
@@ -111,12 +247,29 @@ def actor_width(
 ) -> float:
 
     if track.is_target:
+
         return TARGET_WIDTH
 
     if track.is_av:
+
         return AV_WIDTH
 
     return OTHER_WIDTH
+
+
+def actor_alpha(
+    track: RawTrack,
+) -> float:
+
+    if track.is_target:
+
+        return TARGET_ALPHA
+
+    if track.is_av:
+
+        return TARGET_ALPHA
+
+    return OTHER_ALPHA
 
 
 ###############################################################################
@@ -128,38 +281,32 @@ def draw_direction_arrows(
     ax,
     trajectory: np.ndarray,
     colour: str,
-    *,
-    every: int = ARROW_EVERY,
-    scale: float = 12.0,
 ):
     """
-    Draw arrows indicating travel direction.
+    Draw travel direction arrows.
     """
 
     if len(trajectory) < 2:
+
         return
 
     for i in range(
 
-        every,
+        ARROW_INTERVAL,
 
         len(trajectory),
 
-        every,
+        ARROW_INTERVAL,
 
     ):
-
-        p0 = trajectory[i - 1]
-
-        p1 = trajectory[i]
 
         ax.annotate(
 
             "",
 
-            xy=p1,
+            xy=trajectory[i],
 
-            xytext=p0,
+            xytext=trajectory[i - 1],
 
             arrowprops=dict(
 
@@ -167,37 +314,41 @@ def draw_direction_arrows(
 
                 color=colour,
 
-                lw=1.0,
+                lw=0.8,
+
+                mutation_scale=ARROW_SCALE,
 
                 shrinkA=0,
 
                 shrinkB=0,
 
-                mutation_scale=scale,
-
             ),
 
-            zorder=25,
+            zorder=50,
 
         )
 
-
 ###############################################################################
-# Lane Plotting
+# Lane Rendering
 ###############################################################################
-
 
 def plot_lanes(
     ax,
     scene: RawScene,
 ):
     """
-    Draw HD lane centerlines.
+    Draw only nearby HD lanes.
     """
 
-    for lane in scene.lanes.values():
+    lanes = nearby_lanes(scene)
+
+    for lane in lanes:
 
         centerline = lane.centerline
+
+        #######################################################################
+        # Lane polyline
+        #######################################################################
 
         ax.plot(
 
@@ -209,26 +360,73 @@ def plot_lanes(
 
             linewidth=LANE_WIDTH,
 
-            solid_capstyle="round",
+            alpha=LANE_ALPHA,
 
-            alpha=0.95,
+            solid_capstyle="round",
 
             zorder=1,
 
         )
 
+        #######################################################################
+        # Lane direction arrows
+        #######################################################################
+
+        if len(centerline) < 3:
+
+            continue
+
+        step = max(
+
+            4,
+
+            len(centerline) // 6,
+
+        )
+
+        for i in range(
+
+            step,
+
+            len(centerline),
+
+            step,
+
+        ):
+
+            ax.annotate(
+
+                "",
+
+                xy=centerline[i],
+
+                xytext=centerline[i - 1],
+
+                arrowprops=dict(
+
+                    arrowstyle="-",
+
+                    lw=0.7,
+
+                    color=LANE_COLOR,
+
+                ),
+
+                zorder=2,
+
+            )
+
 
 ###############################################################################
-# Single Track
+# Actor Rendering
 ###############################################################################
-
 
 def plot_track(
     ax,
     track: RawTrack,
 ):
     """
-    Draw one actor.
+    Draw a single actor.
     """
 
     trajectory = track.positions
@@ -237,12 +435,14 @@ def plot_track(
 
     future = trajectory[OBSERVED_STEPS:]
 
-    colour = actor_colour(track)
+    observed_colour, future_colour = actor_colour(track)
 
     width = actor_width(track)
 
+    alpha = actor_alpha(track)
+
     ###########################################################################
-    # Observed
+    # Observed trajectory
     ###########################################################################
 
     ax.plot(
@@ -251,31 +451,23 @@ def plot_track(
 
         observed[:, 1],
 
-        color=colour,
+        color=observed_colour,
 
         linewidth=width,
 
+        alpha=alpha,
+
         solid_capstyle="round",
 
-        zorder=15,
+        zorder=20,
 
     )
 
     ###########################################################################
-    # Future
+    # Future trajectory
     ###########################################################################
 
     if len(future) > 1:
-
-        future_colour = (
-
-            TARGET_FUTURE
-
-            if track.is_target
-
-            else colour
-
-        )
 
         ax.plot(
 
@@ -289,20 +481,24 @@ def plot_track(
 
             linewidth=max(
 
-                width - 0.4,
+                width - 0.3,
 
                 1.0,
 
             ),
 
-            dashes=(5, 3),
+            dashes=(6, 3),
 
-            zorder=16,
+            alpha=alpha,
+
+            solid_capstyle="round",
+
+            zorder=21,
 
         )
 
     ###########################################################################
-    # Direction
+    # Direction arrows
     ###########################################################################
 
     draw_direction_arrows(
@@ -311,12 +507,13 @@ def plot_track(
 
         observed,
 
-        colour,
+        observed_colour,
 
     )
 
+
 ###############################################################################
-# Track Collection
+# All Actors
 ###############################################################################
 
 def plot_tracks(
@@ -326,10 +523,20 @@ def plot_tracks(
     show_ids: bool = False,
 ):
     """
-    Plot every actor in the scene.
+    Plot nearby actors only.
     """
 
-    for track in scene.tracks.values():
+    tracks = nearby_tracks(scene)
+
+    ###########################################################################
+    # Draw others first
+    ###########################################################################
+
+    for track in tracks:
+
+        if track.is_target:
+
+            continue
 
         plot_track(
 
@@ -339,41 +546,57 @@ def plot_tracks(
 
         )
 
-        #######################################################################
-        # Optional Track ID
-        #######################################################################
+    ###########################################################################
+    # Draw target last
+    ###########################################################################
 
-        if show_ids:
+    plot_track(
 
-            position = track.positions[
+        ax,
 
-                min(
-                    OBSERVED_STEPS - 1,
-                    len(track.positions) - 1,
-                )
+        scene.target_track,
 
-            ]
+    )
 
-            ax.text(
+    ###########################################################################
+    # Optional IDs
+    ###########################################################################
 
-                position[0],
+    if not show_ids:
 
-                position[1],
+        return
 
-                track.track_id,
+    for track in tracks:
 
-                fontsize=7,
+        index = min(
 
-                color="black",
+            OBSERVED_STEPS - 1,
 
-                ha="center",
+            len(track.positions) - 1,
 
-                va="center",
+        )
 
-                zorder=40,
+        point = track.positions[index]
 
-            )
+        ax.text(
 
+            point[0],
+
+            point[1],
+
+            track.track_id,
+
+            fontsize=7,
+
+            color="black",
+
+            ha="center",
+
+            va="center",
+
+            zorder=100,
+
+        )
 
 ###############################################################################
 # Scene Bounds
@@ -381,70 +604,21 @@ def plot_tracks(
 
 def compute_scene_bounds(
     scene: RawScene,
-) -> tuple[float, float, float, float]:
+):
     """
-    Compute axis limits automatically.
+    Compute plot limits around the target agent.
+
+    The visualization is intentionally local instead of showing
+    the complete Argoverse map.
     """
 
-    points = []
+    centre = target_position(scene)
 
-    ###########################################################################
-    # Lanes
-    ###########################################################################
+    xmin = centre[0] - LOCAL_RADIUS - SCENE_MARGIN
+    xmax = centre[0] + LOCAL_RADIUS + SCENE_MARGIN
 
-    for lane in scene.lanes.values():
-
-        points.append(
-
-            lane.centerline,
-
-        )
-
-    ###########################################################################
-    # Tracks
-    ###########################################################################
-
-    for track in scene.tracks.values():
-
-        points.append(
-
-            track.positions,
-
-        )
-
-    ###########################################################################
-    # Safety
-    ###########################################################################
-
-    if len(points) == 0:
-
-        return (
-
-            -10,
-
-            10,
-
-            -10,
-
-            10,
-
-        )
-
-    points = np.concatenate(
-
-        points,
-
-        axis=0,
-
-    )
-
-    xmin = points[:, 0].min() - SCENE_MARGIN
-
-    xmax = points[:, 0].max() + SCENE_MARGIN
-
-    ymin = points[:, 1].min() - SCENE_MARGIN
-
-    ymax = points[:, 1].max() + SCENE_MARGIN
+    ymin = centre[1] - LOCAL_RADIUS - SCENE_MARGIN
+    ymax = centre[1] + LOCAL_RADIUS + SCENE_MARGIN
 
     return (
 
@@ -468,7 +642,7 @@ def style_axes(
     scene: RawScene,
 ):
     """
-    Apply publication-style formatting.
+    Apply paper-style formatting.
     """
 
     xmin, xmax, ymin, ymax = compute_scene_bounds(
@@ -493,6 +667,10 @@ def style_axes(
 
     )
 
+    ###########################################################################
+    # Equal aspect
+    ###########################################################################
+
     ax.set_aspect(
 
         "equal",
@@ -502,48 +680,40 @@ def style_axes(
     )
 
     ###########################################################################
-    # Clean Paper Style
+    # Remove grid
     ###########################################################################
 
     ax.grid(False)
 
-    ax.set_xlabel("World X (m)")
-
-    ax.set_ylabel("World Y (m)")
-
-    ax.set_title(
-
-        f"Raw Scene {scene.metadata.sequence_id}",
-
-        fontsize=14,
-
-    )
-
     ###########################################################################
-    # Remove top/right frame
+    # Remove tick labels
     ###########################################################################
 
-    ax.spines["top"].set_visible(False)
+    ax.set_xticks([])
 
-    ax.spines["right"].set_visible(False)
+    ax.set_yticks([])
 
     ###########################################################################
-    # Thin remaining frame
+    # Remove axis labels
     ###########################################################################
 
-    ax.spines["left"].set_linewidth(0.8)
+    ax.set_xlabel("")
 
-    ax.spines["bottom"].set_linewidth(0.8)
+    ax.set_ylabel("")
 
-    ax.tick_params(
+    ###########################################################################
+    # Remove title
+    ###########################################################################
 
-        direction="out",
+    ax.set_title("")
 
-        length=4,
+    ###########################################################################
+    # Hide all borders
+    ###########################################################################
 
-        width=0.8,
+    for spine in ax.spines.values():
 
-    )
+        spine.set_visible(False)
 
 
 ###############################################################################
@@ -562,7 +732,7 @@ def plot_raw_scene(
     Parameters
     ----------
     scene
-        Parsed RawScene.
+        Parsed scene.
 
     ax
         Existing matplotlib axis.
@@ -571,16 +741,20 @@ def plot_raw_scene(
         Display track IDs.
     """
 
+    ###########################################################################
+    # Create axis
+    ###########################################################################
+
     if ax is None:
 
         _, ax = plt.subplots(
 
-            figsize=(9, 9),
+            figsize=(8, 8),
 
         )
 
     ###########################################################################
-    # Draw HD Map
+    # HD Map
     ###########################################################################
 
     plot_lanes(
@@ -592,7 +766,7 @@ def plot_raw_scene(
     )
 
     ###########################################################################
-    # Draw Actors
+    # Actors
     ###########################################################################
 
     plot_tracks(
@@ -619,3 +793,13 @@ def plot_raw_scene(
 
     return ax
 
+
+###############################################################################
+# Public API
+###############################################################################
+
+__all__ = [
+
+    "plot_raw_scene",
+
+]

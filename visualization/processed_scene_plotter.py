@@ -3,18 +3,14 @@ visualization.processed_scene_plotter
 
 Publication-quality visualization of a processed SceneData.
 
-Displays
-
-- Local-coordinate lane centerlines
-- Target agent
-- Autonomous Vehicle
-- Other agents
-- Observed trajectories
-- Future trajectories
+Features
+--------
+- Local-coordinate HD map
+- Target agent highlighting
+- Nearby agents
 - Local origin
 - Heading axis
-
-Coordinates are shown in the normalized target-agent frame.
+- Paper-style appearance
 """
 
 from __future__ import annotations
@@ -25,35 +21,220 @@ import numpy as np
 from datasets.scene_data import SceneData
 
 ###############################################################################
-# Plot Style
+# Appearance
 ###############################################################################
 
-LANE_COLOR = "#D6D6D6"
+LANE_COLOR = "#E6E6E6"
 
-TARGET_OBSERVED = "#0B7A75"      # teal
-TARGET_FUTURE = "#C62828"        # red
+TARGET_OBSERVED_COLOR = "#00897B"
 
-AV_COLOR = "#F4A641"             # orange
+TARGET_FUTURE_COLOR = "#D32F2F"
 
-OTHER_COLOR = "#707070"
+AV_COLOR = "#F39C12"
 
-ORIGIN_COLOR = "#202020"
+VEHICLE_COLOR = "#7A7A7A"
+
+PEDESTRIAN_COLOR = "#4CAF50"
+
+CYCLIST_COLOR = "#8E44AD"
+
+BUS_COLOR = "#1565C0"
+
+UNKNOWN_COLOR = "#909090"
 
 ###############################################################################
 # Drawing Parameters
 ###############################################################################
 
-TARGET_WIDTH = 2.8
+TARGET_WIDTH = 2.2
 
-AV_WIDTH = 2.2
+AV_WIDTH = 2.0
 
-OTHER_WIDTH = 1.2
+OTHER_WIDTH = 1.1
 
-LANE_WIDTH = 0.8
+LANE_WIDTH = 0.65
 
-ARROW_EVERY = 4
+LANE_ALPHA = 0.95
 
-SCENE_MARGIN = 5.0
+TARGET_ALPHA = 1.0
+
+OTHER_ALPHA = 0.65
+
+ARROW_INTERVAL = 4
+
+ARROW_SCALE = 8
+
+SCENE_MARGIN = 4.0
+
+LOCAL_RADIUS = 35.0
+
+###############################################################################
+# Actor Appearance
+###############################################################################
+
+
+def actor_colour(
+    agent,
+):
+
+    if agent["category"].upper() == "AGENT":
+
+        return (
+
+            TARGET_OBSERVED_COLOR,
+
+            TARGET_FUTURE_COLOR,
+
+        )
+
+    if agent["object_type"].upper() == "AV":
+
+        return (
+
+            AV_COLOR,
+
+            AV_COLOR,
+
+        )
+
+    colour = {
+
+        "VEHICLE": VEHICLE_COLOR,
+
+        "PEDESTRIAN": PEDESTRIAN_COLOR,
+
+        "CYCLIST": CYCLIST_COLOR,
+
+        "BUS": BUS_COLOR,
+
+    }.get(
+
+        agent["object_type"].upper(),
+
+        UNKNOWN_COLOR,
+
+    )
+
+    return (
+
+        colour,
+
+        colour,
+
+    )
+
+
+def actor_width(
+    agent,
+):
+
+    if agent["category"].upper() == "AGENT":
+
+        return TARGET_WIDTH
+
+    if agent["object_type"].upper() == "AV":
+
+        return AV_WIDTH
+
+    return OTHER_WIDTH
+
+
+def actor_alpha(
+    agent,
+):
+
+    if agent["category"].upper() == "AGENT":
+
+        return TARGET_ALPHA
+
+    if agent["object_type"].upper() == "AV":
+
+        return TARGET_ALPHA
+
+    return OTHER_ALPHA
+
+###############################################################################
+# Nearby Filtering
+###############################################################################
+
+
+def target_position(
+    scene: SceneData,
+):
+
+    target = scene.target_agent
+
+    return target["observed"][-1]
+
+
+def nearby_agents(
+    scene: SceneData,
+):
+
+    centre = target_position(scene)
+
+    selected = []
+
+    for agent in scene.agents:
+
+        if agent["category"].upper() == "AGENT":
+
+            selected.append(agent)
+
+            continue
+
+        if agent["object_type"].upper() == "AV":
+
+            selected.append(agent)
+
+            continue
+
+        distance = np.linalg.norm(
+
+            agent["observed"][-1]
+
+            - centre
+
+        )
+
+        if distance <= LOCAL_RADIUS:
+
+            selected.append(agent)
+
+    return selected
+
+
+def nearby_lanes(
+    scene: SceneData,
+):
+
+    centre = target_position(scene)
+
+    selected = []
+
+    for lane in scene.lanes:
+
+        distance = np.min(
+
+            np.linalg.norm(
+
+                lane["centerline"] - centre,
+
+                axis=1,
+
+            )
+
+        )
+
+        if distance <= LOCAL_RADIUS:
+
+            selected.append(
+
+                lane,
+
+            )
+
+    return selected
 
 ###############################################################################
 # Direction Arrows
@@ -62,25 +243,21 @@ SCENE_MARGIN = 5.0
 
 def draw_direction_arrows(
     ax,
-    trajectory: np.ndarray,
-    colour: str,
-    *,
-    every: int = ARROW_EVERY,
+    trajectory,
+    colour,
 ):
-    """
-    Draw travel direction arrows.
-    """
 
     if len(trajectory) < 2:
+
         return
 
     for i in range(
 
-        every,
+        ARROW_INTERVAL,
 
         len(trajectory),
 
-        every,
+        ARROW_INTERVAL,
 
     ):
 
@@ -96,34 +273,43 @@ def draw_direction_arrows(
 
                 arrowstyle="-|>",
 
+                lw=0.8,
+
                 color=colour,
 
-                lw=1.0,
+                mutation_scale=ARROW_SCALE,
 
-                mutation_scale=11,
+                shrinkA=0,
+
+                shrinkB=0,
 
             ),
 
-            zorder=20,
+            zorder=40,
 
         )
 
 ###############################################################################
-# Lane Plotting
+# Lane Rendering
 ###############################################################################
-
 
 def plot_lanes(
     ax,
     scene: SceneData,
 ):
     """
-    Plot normalized lane centerlines.
+    Draw nearby normalized lane centerlines.
     """
 
-    for lane in scene.lanes:
+    lanes = nearby_lanes(scene)
+
+    for lane in lanes:
 
         centerline = lane["centerline"]
+
+        #######################################################################
+        # Centerline
+        #######################################################################
 
         ax.plot(
 
@@ -135,61 +321,96 @@ def plot_lanes(
 
             linewidth=LANE_WIDTH,
 
+            alpha=LANE_ALPHA,
+
             solid_capstyle="round",
 
             zorder=1,
 
         )
 
+        #######################################################################
+        # Lane Direction
+        #######################################################################
+
+        if len(centerline) < 3:
+
+            continue
+
+        step = max(
+
+            4,
+
+            len(centerline) // 6,
+
+        )
+
+        for i in range(
+
+            step,
+
+            len(centerline),
+
+            step,
+
+        ):
+
+            ax.annotate(
+
+                "",
+
+                xy=centerline[i],
+
+                xytext=centerline[i - 1],
+
+                arrowprops=dict(
+
+                    arrowstyle="-",
+
+                    lw=0.7,
+
+                    color=LANE_COLOR,
+
+                ),
+
+                zorder=2,
+
+            )
+
+
 ###############################################################################
 # Single Agent
 ###############################################################################
-
 
 def plot_agent(
     ax,
     agent,
 ):
+    """
+    Draw one processed actor.
+    """
 
     observed = agent["observed"]
 
     future = agent["future"]
 
-    ###########################################################################
-    # Target
-    ###########################################################################
+    observed_colour, future_colour = actor_colour(
 
-    if agent["category"].upper() == "AGENT":
+        agent,
 
-        observed_colour = TARGET_OBSERVED
+    )
 
-        future_colour = TARGET_FUTURE
+    width = actor_width(
 
-        width = TARGET_WIDTH
+        agent,
 
-    ###########################################################################
-    # AV
-    ###########################################################################
+    )
 
-    elif agent["object_type"].upper() == "AV":
+    alpha = actor_alpha(
 
-        observed_colour = AV_COLOR
+        agent,
 
-        future_colour = AV_COLOR
-
-        width = AV_WIDTH
-
-    ###########################################################################
-    # Others
-    ###########################################################################
-
-    else:
-
-        observed_colour = OTHER_COLOR
-
-        future_colour = OTHER_COLOR
-
-        width = OTHER_WIDTH
+    )
 
     ###########################################################################
     # Observed
@@ -205,9 +426,11 @@ def plot_agent(
 
         linewidth=width,
 
+        alpha=alpha,
+
         solid_capstyle="round",
 
-        zorder=15,
+        zorder=20,
 
     )
 
@@ -215,7 +438,7 @@ def plot_agent(
     # Future
     ###########################################################################
 
-    if len(future):
+    if len(future) > 1:
 
         ax.plot(
 
@@ -227,16 +450,26 @@ def plot_agent(
 
             color=future_colour,
 
-            linewidth=max(width - 0.4, 1.0),
+            linewidth=max(
 
-            dashes=(5, 3),
+                width - 0.3,
 
-            zorder=16,
+                1.0,
+
+            ),
+
+            dashes=(6, 3),
+
+            alpha=alpha,
+
+            solid_capstyle="round",
+
+            zorder=21,
 
         )
 
     ###########################################################################
-    # Direction
+    # Direction Arrows
     ###########################################################################
 
     draw_direction_arrows(
@@ -249,8 +482,9 @@ def plot_agent(
 
     )
 
+
 ###############################################################################
-# Agent Collection
+# All Agents
 ###############################################################################
 
 def plot_agents(
@@ -260,10 +494,24 @@ def plot_agents(
     show_ids: bool = False,
 ):
     """
-    Plot every processed agent.
+    Draw nearby processed actors.
     """
 
-    for agent in scene.agents:
+    agents = nearby_agents(
+
+        scene,
+
+    )
+
+    ###########################################################################
+    # Draw non-target agents first
+    ###########################################################################
+
+    for agent in agents:
+
+        if agent["category"].upper() == "AGENT":
+
+            continue
 
         plot_agent(
 
@@ -273,48 +521,63 @@ def plot_agents(
 
         )
 
-        #######################################################################
-        # Optional Track ID
-        #######################################################################
+    ###########################################################################
+    # Draw target on top
+    ###########################################################################
 
-        if show_ids:
+    plot_agent(
 
-            position = agent["observed"][-1]
+        ax,
 
-            ax.text(
+        scene.target_agent,
 
-                position[0],
+    )
 
-                position[1],
+    ###########################################################################
+    # Optional IDs
+    ###########################################################################
 
-                str(agent["track_id"]),
+    if not show_ids:
 
-                fontsize=7,
+        return
 
-                ha="center",
+    for agent in agents:
 
-                va="center",
+        point = agent["observed"][-1]
 
-                color="black",
+        ax.text(
 
-                zorder=30,
+            point[0],
 
-            )
+            point[1],
+
+            str(agent["track_id"]),
+
+            fontsize=7,
+
+            color="black",
+
+            ha="center",
+
+            va="center",
+
+            zorder=100,
+
+        )
 
 
 ###############################################################################
-# Local Coordinate Frame
+# Local Reference Frame
 ###############################################################################
 
 def plot_reference_frame(
     ax,
 ):
     """
-    Draw local origin and heading direction.
+    Draw the local coordinate frame.
 
-    In the processed frame:
-        Origin  -> (0,0)
-        Heading -> +X
+    The target agent is centred at (0,0)
+    with heading aligned to +X.
     """
 
     ###########################################################################
@@ -329,18 +592,18 @@ def plot_reference_frame(
 
         marker="+",
 
-        color=ORIGIN_COLOR,
+        color="black",
 
         markersize=12,
 
         markeredgewidth=2,
 
-        zorder=40,
+        zorder=50,
 
     )
 
     ###########################################################################
-    # Heading Axis
+    # Heading
     ###########################################################################
 
     ax.annotate(
@@ -355,32 +618,17 @@ def plot_reference_frame(
 
             arrowstyle="-|>",
 
-            color=ORIGIN_COLOR,
+            lw=1.2,
 
-            lw=1.5,
+            color="black",
 
-            mutation_scale=12,
+            mutation_scale=10,
 
         ),
 
-        zorder=40,
+        zorder=50,
 
     )
-
-    ax.text(
-
-        6.5,
-
-        0.0,
-
-        "Heading",
-
-        fontsize=9,
-
-        va="center",
-
-    )
-
 
 ###############################################################################
 # Scene Bounds
@@ -390,32 +638,48 @@ def compute_scene_bounds(
     scene: SceneData,
 ):
     """
-    Compute automatic axis limits.
+    Compute local plotting bounds.
+
+    Unlike the raw visualization, the processed scene is already
+    normalized around the target. We therefore crop around the
+    transformed trajectories instead of using a fixed map extent.
     """
 
     points = []
 
     ###########################################################################
-    # Lanes
+    # Target
     ###########################################################################
 
-    for lane in scene.lanes:
+    target = scene.target_agent
+
+    points.append(
+
+        target["observed"]
+
+    )
+
+    if len(target["future"]):
 
         points.append(
 
-            lane["centerline"],
+            target["future"]
 
         )
 
     ###########################################################################
-    # Agents
+    # Nearby agents
     ###########################################################################
 
-    for agent in scene.agents:
+    for agent in nearby_agents(scene):
+
+        if agent is target:
+
+            continue
 
         points.append(
 
-            agent["observed"],
+            agent["observed"]
 
         )
 
@@ -423,9 +687,21 @@ def compute_scene_bounds(
 
             points.append(
 
-                agent["future"],
+                agent["future"]
 
             )
+
+    ###########################################################################
+    # Nearby lanes
+    ###########################################################################
+
+    for lane in nearby_lanes(scene):
+
+        points.append(
+
+            lane["centerline"]
+
+        )
 
     ###########################################################################
     # Fallback
@@ -435,13 +711,13 @@ def compute_scene_bounds(
 
         return (
 
-            -10,
+            -20.0,
 
-            10,
+            20.0,
 
-            -10,
+            -20.0,
 
-            10,
+            20.0,
 
         )
 
@@ -454,11 +730,9 @@ def compute_scene_bounds(
     )
 
     xmin = points[:, 0].min() - SCENE_MARGIN
-
     xmax = points[:, 0].max() + SCENE_MARGIN
 
     ymin = points[:, 1].min() - SCENE_MARGIN
-
     ymax = points[:, 1].max() + SCENE_MARGIN
 
     return (
@@ -483,7 +757,7 @@ def style_axes(
     scene: SceneData,
 ):
     """
-    Publication-style formatting.
+    Publication-style appearance.
     """
 
     xmin, xmax, ymin, ymax = compute_scene_bounds(
@@ -508,6 +782,10 @@ def style_axes(
 
     )
 
+    ###########################################################################
+    # Equal scaling
+    ###########################################################################
+
     ax.set_aspect(
 
         "equal",
@@ -517,44 +795,28 @@ def style_axes(
     )
 
     ###########################################################################
-    # Clean Style
+    # Clean appearance
     ###########################################################################
 
     ax.grid(False)
 
-    ax.set_xlabel("Local X (m)")
+    ax.set_xticks([])
 
-    ax.set_ylabel("Local Y (m)")
+    ax.set_yticks([])
 
-    ax.set_title(
+    ax.set_xlabel("")
 
-        f"Processed Scene {scene.sequence_id}",
+    ax.set_ylabel("")
 
-        fontsize=14,
-
-    )
+    ax.set_title("")
 
     ###########################################################################
-    # Remove top/right border
+    # Hide frame
     ###########################################################################
 
-    ax.spines["top"].set_visible(False)
+    for spine in ax.spines.values():
 
-    ax.spines["right"].set_visible(False)
-
-    ax.spines["left"].set_linewidth(0.8)
-
-    ax.spines["bottom"].set_linewidth(0.8)
-
-    ax.tick_params(
-
-        direction="out",
-
-        length=4,
-
-        width=0.8,
-
-    )
+        spine.set_visible(False)
 
 
 ###############################################################################
@@ -579,19 +841,23 @@ def plot_processed_scene(
         Existing matplotlib axis.
 
     show_ids
-        Draw track IDs.
+        Display actor IDs.
     """
+
+    ###########################################################################
+    # Create axis
+    ###########################################################################
 
     if ax is None:
 
         _, ax = plt.subplots(
 
-            figsize=(9, 9),
+            figsize=(8, 8),
 
         )
 
     ###########################################################################
-    # Draw HD map
+    # HD map
     ###########################################################################
 
     plot_lanes(
@@ -603,7 +869,7 @@ def plot_processed_scene(
     )
 
     ###########################################################################
-    # Draw actors
+    # Actors
     ###########################################################################
 
     plot_agents(
@@ -617,7 +883,7 @@ def plot_processed_scene(
     )
 
     ###########################################################################
-    # Local frame
+    # Local coordinate frame
     ###########################################################################
 
     plot_reference_frame(
@@ -627,7 +893,7 @@ def plot_processed_scene(
     )
 
     ###########################################################################
-    # Style
+    # Formatting
     ###########################################################################
 
     style_axes(
@@ -641,4 +907,12 @@ def plot_processed_scene(
     return ax
 
 
+###############################################################################
+# Public API
+###############################################################################
 
+__all__ = [
+
+    "plot_processed_scene",
+
+]
