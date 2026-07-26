@@ -44,6 +44,7 @@ class Evaluator:
         self.device = torch.device(device)
 
         self.model.to(self.device)
+        self.model.eval()
 
 
     ###########################################################################
@@ -93,6 +94,17 @@ class Evaluator:
                 batch["future_trajectories"],
 
             )
+
+            ###############################################################
+            # Convert tensors to Python floats
+            ###############################################################
+
+            batch_metrics = {
+                key: float(value)
+                if isinstance(value, torch.Tensor)
+                else value
+                for key, value in batch_metrics.items()
+            }
 
             for key, value in batch_metrics.items():
 
