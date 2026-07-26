@@ -772,7 +772,7 @@ class MapLoader:
         self,
         lane_id: int,
         city: str,
-    ) -> LaneSegment | None:
+    ) -> LaneSegment:
         """
         Retrieve one lane segment.
 
@@ -787,9 +787,16 @@ class MapLoader:
             city,
         )
 
-        return vector_map.get_lane(
+        lane = vector_map.get_lane(
             lane_id,
         )
+
+        if lane is None:
+            raise KeyError(
+                f"Lane {lane_id} not found in {city}."
+            )
+
+        return lane
 
     ###########################################################################
 
