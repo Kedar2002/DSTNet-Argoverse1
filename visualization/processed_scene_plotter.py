@@ -1,16 +1,20 @@
 """
 visualization.processed_scene_plotter
 
-Visualize a processed SceneData in the local reference frame.
+Publication-quality visualization of a processed SceneData.
 
 Displays
 
-- Normalized lane centerlines
+- Local-coordinate lane centerlines
 - Target agent
-- AV
+- Autonomous Vehicle
 - Other agents
+- Observed trajectories
+- Future trajectories
 - Local origin
-- Heading direction
+- Heading axis
+
+Coordinates are shown in the normalized target-agent frame.
 """
 
 from __future__ import annotations
@@ -21,29 +25,101 @@ import numpy as np
 from datasets.scene_data import SceneData
 
 ###############################################################################
-# Colours
+# Plot Style
 ###############################################################################
 
-LANE_COLOR = "lightgray"
+LANE_COLOR = "#D6D6D6"
 
-TARGET_OBS = "tab:blue"
+TARGET_OBSERVED = "#0B7A75"      # teal
+TARGET_FUTURE = "#C62828"        # red
 
-TARGET_FUTURE = "tab:green"
+AV_COLOR = "#F4A641"             # orange
 
-AV_COLOR = "tab:orange"
+OTHER_COLOR = "#707070"
 
-OTHER_COLOR = "gray"
-
-ORIGIN_COLOR = "red"
+ORIGIN_COLOR = "#202020"
 
 ###############################################################################
-# Lanes
+# Drawing Parameters
 ###############################################################################
+
+TARGET_WIDTH = 2.8
+
+AV_WIDTH = 2.2
+
+OTHER_WIDTH = 1.2
+
+LANE_WIDTH = 0.8
+
+ARROW_EVERY = 4
+
+SCENE_MARGIN = 5.0
+
+###############################################################################
+# Direction Arrows
+###############################################################################
+
+
+def draw_direction_arrows(
+    ax,
+    trajectory: np.ndarray,
+    colour: str,
+    *,
+    every: int = ARROW_EVERY,
+):
+    """
+    Draw travel direction arrows.
+    """
+
+    if len(trajectory) < 2:
+        return
+
+    for i in range(
+
+        every,
+
+        len(trajectory),
+
+        every,
+
+    ):
+
+        ax.annotate(
+
+            "",
+
+            xy=trajectory[i],
+
+            xytext=trajectory[i - 1],
+
+            arrowprops=dict(
+
+                arrowstyle="-|>",
+
+                color=colour,
+
+                lw=1.0,
+
+                mutation_scale=11,
+
+            ),
+
+            zorder=20,
+
+        )
+
+###############################################################################
+# Lane Plotting
+###############################################################################
+
 
 def plot_lanes(
     ax,
     scene: SceneData,
 ):
+    """
+    Plot normalized lane centerlines.
+    """
 
     for lane in scene.lanes:
 
@@ -57,14 +133,124 @@ def plot_lanes(
 
             color=LANE_COLOR,
 
-            linewidth=1.2,
+            linewidth=LANE_WIDTH,
+
+            solid_capstyle="round",
 
             zorder=1,
 
         )
 
 ###############################################################################
-# Agents
+# Single Agent
+###############################################################################
+
+
+def plot_agent(
+    ax,
+    agent,
+):
+
+    observed = agent["observed"]
+
+    future = agent["future"]
+
+    ###########################################################################
+    # Target
+    ###########################################################################
+
+    if agent["category"].upper() == "AGENT":
+
+        observed_colour = TARGET_OBSERVED
+
+        future_colour = TARGET_FUTURE
+
+        width = TARGET_WIDTH
+
+    ###########################################################################
+    # AV
+    ###########################################################################
+
+    elif agent["object_type"].upper() == "AV":
+
+        observed_colour = AV_COLOR
+
+        future_colour = AV_COLOR
+
+        width = AV_WIDTH
+
+    ###########################################################################
+    # Others
+    ###########################################################################
+
+    else:
+
+        observed_colour = OTHER_COLOR
+
+        future_colour = OTHER_COLOR
+
+        width = OTHER_WIDTH
+
+    ###########################################################################
+    # Observed
+    ###########################################################################
+
+    ax.plot(
+
+        observed[:, 0],
+
+        observed[:, 1],
+
+        color=observed_colour,
+
+        linewidth=width,
+
+        solid_capstyle="round",
+
+        zorder=15,
+
+    )
+
+    ###########################################################################
+    # Future
+    ###########################################################################
+
+    if len(future):
+
+        ax.plot(
+
+            future[:, 0],
+
+            future[:, 1],
+
+            "--",
+
+            color=future_colour,
+
+            linewidth=max(width - 0.4, 1.0),
+
+            dashes=(5, 3),
+
+            zorder=16,
+
+        )
+
+    ###########################################################################
+    # Direction
+    ###########################################################################
+
+    draw_direction_arrows(
+
+        ax,
+
+        observed,
+
+        observed_colour,
+
+    )
+
+###############################################################################
+# Agent Collection
 ###############################################################################
 
 def plot_agents(
@@ -73,227 +259,252 @@ def plot_agents(
     *,
     show_ids: bool = False,
 ):
+    """
+    Plot every processed agent.
+    """
 
     for agent in scene.agents:
 
-        observed = agent["observed"]
+        plot_agent(
 
-        future = agent["future"]
+            ax,
 
-        #######################################################################
-        # Target Agent
-        #######################################################################
-
-        if agent["category"].upper() == "AGENT":
-
-            colour_obs = TARGET_OBS
-
-            colour_future = TARGET_FUTURE
-
-            width = 3.0
-
-        #######################################################################
-        # AV
-        #######################################################################
-
-        elif agent["object_type"].upper() == "AV":
-
-            colour_obs = AV_COLOR
-
-            colour_future = AV_COLOR
-
-            width = 2.5
-
-        #######################################################################
-        # Others
-        #######################################################################
-
-        else:
-
-            colour_obs = OTHER_COLOR
-
-            colour_future = OTHER_COLOR
-
-            width = 1.2
-
-        ###############################################################
-        # Observed
-        ###############################################################
-
-        ax.plot(
-
-            observed[:, 0],
-
-            observed[:, 1],
-
-            color=colour_obs,
-
-            linewidth=width,
-
-            zorder=5,
+            agent,
 
         )
 
-        ###############################################################
-        # Future
-        ###############################################################
-
-        if len(future) > 0:
-
-            ax.plot(
-
-                future[:, 0],
-
-                future[:, 1],
-
-                "--",
-
-                color=colour_future,
-
-                linewidth=width,
-
-                zorder=6,
-
-            )
-
-        ###############################################################
-        # End point
-        ###############################################################
-
-        ax.scatter(
-
-            observed[-1, 0],
-
-            observed[-1, 1],
-
-            color=colour_obs,
-
-            s=20,
-
-            zorder=7,
-
-        )
-
-        ###############################################################
-        # IDs
-        ###############################################################
+        #######################################################################
+        # Optional Track ID
+        #######################################################################
 
         if show_ids:
 
+            position = agent["observed"][-1]
+
             ax.text(
 
-                observed[-1, 0],
+                position[0],
 
-                observed[-1, 1],
+                position[1],
 
                 str(agent["track_id"]),
 
                 fontsize=7,
 
+                ha="center",
+
+                va="center",
+
+                color="black",
+
+                zorder=30,
+
             )
 
+
 ###############################################################################
-# Origin
+# Local Coordinate Frame
 ###############################################################################
 
-def plot_origin(
+def plot_reference_frame(
     ax,
 ):
+    """
+    Draw local origin and heading direction.
 
-    ax.scatter(
+    In the processed frame:
+        Origin  -> (0,0)
+        Heading -> +X
+    """
+
+    ###########################################################################
+    # Origin
+    ###########################################################################
+
+    ax.plot(
 
         0.0,
 
         0.0,
 
-        marker="*",
-
-        s=120,
+        marker="+",
 
         color=ORIGIN_COLOR,
 
-        zorder=20,
+        markersize=12,
 
-        label="Origin",
+        markeredgewidth=2,
 
-    )
-
-    ax.arrow(
-
-        0.0,
-
-        0.0,
-
-        5.0,
-
-        0.0,
-
-        width=0.1,
-
-        color=ORIGIN_COLOR,
-
-        zorder=20,
+        zorder=40,
 
     )
 
+    ###########################################################################
+    # Heading Axis
+    ###########################################################################
+
+    ax.annotate(
+
+        "",
+
+        xy=(6.0, 0.0),
+
+        xytext=(0.0, 0.0),
+
+        arrowprops=dict(
+
+            arrowstyle="-|>",
+
+            color=ORIGIN_COLOR,
+
+            lw=1.5,
+
+            mutation_scale=12,
+
+        ),
+
+        zorder=40,
+
+    )
+
+    ax.text(
+
+        6.5,
+
+        0.0,
+
+        "Heading",
+
+        fontsize=9,
+
+        va="center",
+
+    )
+
+
 ###############################################################################
-# Main
+# Scene Bounds
 ###############################################################################
 
-def plot_processed_scene(
+def compute_scene_bounds(
     scene: SceneData,
-    *,
-    ax=None,
-    show_ids: bool = False,
 ):
+    """
+    Compute automatic axis limits.
+    """
 
-    if ax is None:
+    points = []
 
-        _, ax = plt.subplots(
+    ###########################################################################
+    # Lanes
+    ###########################################################################
 
-            figsize=(10, 10),
+    for lane in scene.lanes:
+
+        points.append(
+
+            lane["centerline"],
 
         )
 
-    plot_lanes(
+    ###########################################################################
+    # Agents
+    ###########################################################################
 
-        ax,
+    for agent in scene.agents:
+
+        points.append(
+
+            agent["observed"],
+
+        )
+
+        if len(agent["future"]):
+
+            points.append(
+
+                agent["future"],
+
+            )
+
+    ###########################################################################
+    # Fallback
+    ###########################################################################
+
+    if len(points) == 0:
+
+        return (
+
+            -10,
+
+            10,
+
+            -10,
+
+            10,
+
+        )
+
+    points = np.concatenate(
+
+        points,
+
+        axis=0,
+
+    )
+
+    xmin = points[:, 0].min() - SCENE_MARGIN
+
+    xmax = points[:, 0].max() + SCENE_MARGIN
+
+    ymin = points[:, 1].min() - SCENE_MARGIN
+
+    ymax = points[:, 1].max() + SCENE_MARGIN
+
+    return (
+
+        xmin,
+
+        xmax,
+
+        ymin,
+
+        ymax,
+
+    )
+
+
+###############################################################################
+# Axis Styling
+###############################################################################
+
+def style_axes(
+    ax,
+    scene: SceneData,
+):
+    """
+    Publication-style formatting.
+    """
+
+    xmin, xmax, ymin, ymax = compute_scene_bounds(
 
         scene,
 
     )
 
-    plot_agents(
+    ax.set_xlim(
 
-        ax,
+        xmin,
 
-        scene,
-
-        show_ids=show_ids,
+        xmax,
 
     )
 
-    plot_origin(
+    ax.set_ylim(
 
-        ax,
+        ymin,
 
-    )
-
-    ax.set_title(
-
-        f"Processed Scene : {scene.sequence_id}"
-
-    )
-
-    ax.set_xlabel(
-
-        "Local X (m)"
-
-    )
-
-    ax.set_ylabel(
-
-        "Local Y (m)"
+        ymax,
 
     )
 
@@ -305,10 +516,129 @@ def plot_processed_scene(
 
     )
 
-    ax.grid(
+    ###########################################################################
+    # Clean Style
+    ###########################################################################
 
-        alpha=0.25,
+    ax.grid(False)
+
+    ax.set_xlabel("Local X (m)")
+
+    ax.set_ylabel("Local Y (m)")
+
+    ax.set_title(
+
+        f"Processed Scene {scene.sequence_id}",
+
+        fontsize=14,
+
+    )
+
+    ###########################################################################
+    # Remove top/right border
+    ###########################################################################
+
+    ax.spines["top"].set_visible(False)
+
+    ax.spines["right"].set_visible(False)
+
+    ax.spines["left"].set_linewidth(0.8)
+
+    ax.spines["bottom"].set_linewidth(0.8)
+
+    ax.tick_params(
+
+        direction="out",
+
+        length=4,
+
+        width=0.8,
+
+    )
+
+
+###############################################################################
+# Main Plotter
+###############################################################################
+
+def plot_processed_scene(
+    scene: SceneData,
+    *,
+    ax=None,
+    show_ids: bool = False,
+):
+    """
+    Plot a processed SceneData object.
+
+    Parameters
+    ----------
+    scene
+        Processed scene.
+
+    ax
+        Existing matplotlib axis.
+
+    show_ids
+        Draw track IDs.
+    """
+
+    if ax is None:
+
+        _, ax = plt.subplots(
+
+            figsize=(9, 9),
+
+        )
+
+    ###########################################################################
+    # Draw HD map
+    ###########################################################################
+
+    plot_lanes(
+
+        ax,
+
+        scene,
+
+    )
+
+    ###########################################################################
+    # Draw actors
+    ###########################################################################
+
+    plot_agents(
+
+        ax,
+
+        scene,
+
+        show_ids=show_ids,
+
+    )
+
+    ###########################################################################
+    # Local frame
+    ###########################################################################
+
+    plot_reference_frame(
+
+        ax,
+
+    )
+
+    ###########################################################################
+    # Style
+    ###########################################################################
+
+    style_axes(
+
+        ax,
+
+        scene,
 
     )
 
     return ax
+
+
+
