@@ -260,4 +260,12 @@ class ScenePreprocessor:
 
         return processed_lanes
 
+    def __call__(
+        self,
+        scene: RawScene,
+    ) -> SceneData:
+        """
+        Allow ScenePreprocessor(scene) syntax.
+        """
+        return self.preprocess(scene)
 
