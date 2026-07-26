@@ -134,7 +134,7 @@ class SceneData:
 
         for agent in self.agents:
 
-            if agent["category"] == "AGENT":
+            if agent["category"].upper() == "AGENT":
                 return agent
 
         raise RuntimeError(
@@ -149,7 +149,7 @@ class SceneData:
 
         for agent in self.agents:
 
-            if agent["category"] == "AV":
+            if agent["object_type"] == "AV":
                 return agent
 
         return None
