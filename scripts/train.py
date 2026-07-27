@@ -170,6 +170,14 @@ SAVE_EVERY = 1
 GRADIENT_CLIP = 5.0
 
 ###############################################################################
+# Early Stopping
+###############################################################################
+
+EARLY_STOPPING = True
+
+PATIENCE = 8
+
+###############################################################################
 # Utilities
 ###############################################################################
 
@@ -906,6 +914,28 @@ def train_one_epoch(
 
         )
 
+        ###########################################################################
+        # Gradient Monitoring
+        ###########################################################################
+
+        if torch.isnan(gradient_norm):
+
+            raise RuntimeError(
+
+                "Gradient norm became NaN."
+
+            )
+
+        if gradient_norm > 100:
+
+            print(
+
+                f"\n[Warning] Large gradient norm: "
+
+                f"{gradient_norm:.2f}"
+
+            )
+
         ###############################################################
         # Optimizer
         ###############################################################
@@ -1300,6 +1330,12 @@ def run_training(
     )
 
     ###########################################################################
+    # Early Stopping
+    ###########################################################################
+
+    epochs_without_improvement = 0
+
+    ###########################################################################
     # Training
     ###########################################################################
 
@@ -1409,6 +1445,8 @@ def run_training(
 
                 best_metric = current_metric
 
+                epochs_without_improvement = 0
+
                 print()
 
                 print(
@@ -1416,6 +1454,18 @@ def run_training(
                     f"✓ New Best Model "
 
                     f"(minADE={best_metric:.6f})"
+
+                )
+
+            else:
+
+                epochs_without_improvement += 1
+
+                print(
+
+                    f"No improvement "
+
+                    f"({epochs_without_improvement}/{PATIENCE})"
 
                 )
 
@@ -1452,6 +1502,42 @@ def run_training(
                 epoch_time=epoch_time,
 
             )
+
+            ###########################################################################
+            # Early Stopping
+            ###########################################################################
+
+            if (
+
+                EARLY_STOPPING
+
+                and
+
+                epochs_without_improvement >= PATIENCE
+
+            ):
+
+                print()
+
+                print("=" * 80)
+
+                print(
+
+                    "Early stopping triggered."
+
+                )
+
+                print(
+
+                    f"No improvement for "
+
+                    f"{PATIENCE} epochs."
+
+                )
+
+                print("=" * 80)
+
+                break
 
     except KeyboardInterrupt:
 

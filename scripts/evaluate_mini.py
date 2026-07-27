@@ -53,7 +53,7 @@ from scripts.evaluate import (
 # Mini Configuration
 ###############################################################################
 
-VAL_SCENES = 64
+VAL_SCENES = 512
 
 CHECKPOINT = (
 
