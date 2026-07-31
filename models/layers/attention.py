@@ -113,6 +113,7 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
         *,
         mask: torch.Tensor | None = None,
+        key_padding_mask: torch.Tensor | None = None,
         attention_bias: torch.Tensor | None = None,
         return_attention: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -141,6 +142,19 @@ class MultiHeadAttention(nn.Module):
         scores = scores / math.sqrt(
             self._head_dim,
         )
+
+        #######################################################################
+        # Key Padding Mask
+        #######################################################################
+
+        if key_padding_mask is not None:
+
+            key_padding_mask = key_padding_mask[:, None, None, :]
+
+            scores = scores.masked_fill(
+                ~key_padding_mask,
+                torch.finfo(scores.dtype).min,
+            )
 
         #######################################################################
         # Relative Attention Bias
@@ -172,6 +186,11 @@ class MultiHeadAttention(nn.Module):
         #######################################################################
         # Attention
         #######################################################################
+
+        scores = scores - scores.max(
+            dim=-1,
+            keepdim=True,
+        ).values
 
         attention = torch.softmax(
             scores,
@@ -221,5 +240,15 @@ class MultiHeadAttention(nn.Module):
             f"hidden_dim={self._hidden_dim}, "
             f"num_heads={self._num_heads})"
         )
+
+    @property
+    def num_heads(self):
+
+        return self._num_heads
+
+    @property
+    def head_dim(self):
+
+        return self._head_dim
 
 

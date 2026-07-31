@@ -12,10 +12,6 @@ model:
 
   tri_atm_layers: 2
 
-  feature_dropout: 0.1
-
-  window_size: 4
-
   num_modes: 6
 
   future_steps: 30
@@ -25,3 +21,17 @@ model:
   refinement_iterations: 2
 
   enable_bezier: true
+
+  mspa:
+
+    radii: [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 60.0, inf]
+
+    feature_dropout: 0.1
+
+  mhca:
+
+    window_sizes: [2, 4, 8]
+
+    causal: true
+
+    use_multi_scale: true

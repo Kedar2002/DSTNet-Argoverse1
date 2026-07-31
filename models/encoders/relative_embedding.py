@@ -19,6 +19,13 @@ from models.model_types import RelativeFeatures
 class RelativeEmbedding(nn.Module):
     """
     Relative geometry embedding.
+
+    Features
+    --------
+    dx
+    dy
+    Euclidean distance
+    Wrapped heading difference
     """
 
     def __init__(
@@ -38,6 +45,10 @@ class RelativeEmbedding(nn.Module):
             dropout=dropout,
         )
 
+    ###########################################################################
+    # Forward
+    ###########################################################################
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -47,10 +58,10 @@ class RelativeEmbedding(nn.Module):
         Parameters
         ----------
         positions
-            Shape (B, N, 2)
+            Shape (B,N,2)
 
         headings
-            Shape (B, N)
+            Shape (B,N)
 
         Returns
         -------
@@ -62,14 +73,25 @@ class RelativeEmbedding(nn.Module):
                 "positions must have shape (B,N,2)."
             )
 
+        if positions.shape[-1] != 2:
+            raise ValueError(
+                "Last dimension of positions must equal 2."
+            )
+
         if headings.ndim != 2:
             raise ValueError(
                 "headings must have shape (B,N)."
             )
 
-        ###############################################################
+        if positions.shape[:2] != headings.shape:
+            raise ValueError(
+                "positions and headings must contain the same "
+                "batch size and number of agents."
+            )
+
+        #######################################################################
         # Pairwise position differences
-        ###############################################################
+        #######################################################################
 
         delta = (
             positions[:, :, None, :]
@@ -80,27 +102,37 @@ class RelativeEmbedding(nn.Module):
 
         dy = delta[..., 1]
 
-        ###############################################################
-        # Distance
-        ###############################################################
+        #######################################################################
+        # Euclidean distance
+        #######################################################################
 
-        distance = torch.linalg.norm(
-            delta,
-            dim=-1,
+        distance = torch.sqrt(
+            dx * dx +
+            dy * dy +
+            1e-8,
         )
 
-        ###############################################################
-        # Heading difference
-        ###############################################################
+        #######################################################################
+        # Wrapped heading difference
+        #
+        # atan2(sin Δθ, cos Δθ)
+        #
+        # Avoids discontinuities around ±π.
+        #######################################################################
 
-        heading_delta = (
+        raw_delta = (
             headings[:, :, None]
             - headings[:, None, :]
         )
 
-        ###############################################################
-        # Relative vector
-        ###############################################################
+        heading_delta = torch.atan2(
+            torch.sin(raw_delta),
+            torch.cos(raw_delta),
+        )
+
+        #######################################################################
+        # Relative feature vector
+        #######################################################################
 
         features = torch.stack(
             (
@@ -112,8 +144,12 @@ class RelativeEmbedding(nn.Module):
             dim=-1,
         )
 
+        #######################################################################
+        # Embedding
+        #######################################################################
+
         embedding = self.embedding(
-            features
+            features,
         )
 
         return RelativeFeatures(
@@ -124,10 +160,11 @@ class RelativeEmbedding(nn.Module):
             embedding=embedding,
         )
 
+    ###########################################################################
+
     def __repr__(self) -> str:
 
         return (
             "RelativeEmbedding("
             f"hidden_dim={self.hidden_dim})"
         )
-

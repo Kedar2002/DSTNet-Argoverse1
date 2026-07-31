@@ -48,7 +48,7 @@ class Encoder(nn.Module):
         self,
         hidden_dim: int = 256,
         num_heads: int = 8,
-        num_layers: int = 3,
+        num_layers: int = 2,
         dropout: float = 0.1,
     ) -> None:
 

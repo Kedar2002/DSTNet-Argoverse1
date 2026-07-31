@@ -1,57 +1,50 @@
-import torch.nn as nn
+import torch
 
-from engine.optimizer import build_optimizer
-from engine.scheduler import build_scheduler
+from models.encoders.relative_embedding import RelativeEmbedding
 
-from engine.checkpoint import (
-    save_checkpoint,
-    load_checkpoint,
-)
 
-model = nn.Linear(
-    32,
-    16,
-)
+def main():
 
-optimizer = build_optimizer(
-    model,
-)
+    B = 2
+    N = 6
 
-scheduler = build_scheduler(
-    optimizer,
-    total_steps=100,
-)
+    model = RelativeEmbedding()
 
-save_checkpoint(
+    positions = torch.randn(
+        B,
+        N,
+        2,
+    )
 
-    path="checkpoint_test.pth",
+    headings = torch.randn(
+        B,
+        N,
+    )
 
-    model=model,
+    relative = model(
+        positions=positions,
+        headings=headings,
+    )
 
-    optimizer=optimizer,
+    print("=" * 80)
+    print("RelativeEmbedding Test")
+    print("=" * 80)
 
-    scheduler=scheduler,
+    print("dx            :", relative.dx.shape)
+    print("dy            :", relative.dy.shape)
+    print("distance      :", relative.distance.shape)
+    print("heading_delta :", relative.heading_delta.shape)
+    print("embedding     :", relative.embedding.shape)
 
-    epoch=5,
+    assert relative.dx.shape == (B, N, N)
+    assert relative.dy.shape == (B, N, N)
+    assert relative.distance.shape == (B, N, N)
+    assert relative.heading_delta.shape == (B, N, N)
+    assert relative.embedding.shape == (B, N, N, 256)
 
-    global_step=200,
+    print()
+    print("✓ RelativeEmbedding test passed")
 
-    metrics={
-        "loss": 1.23,
-    },
 
-)
-
-state = load_checkpoint(
-
-    path="checkpoint_test.pth",
-
-    model=model,
-
-    optimizer=optimizer,
-
-    scheduler=scheduler,
-
-)
-
-print(state)
+if __name__ == "__main__":
+    main()
