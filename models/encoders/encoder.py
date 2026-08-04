@@ -26,6 +26,7 @@ from __future__ import annotations
 from torch import nn
 import torch
 
+from models.model_types import GraphData
 from models.attention.tri_atm import TriATM
 from models.encoders.relative_embedding import RelativeEmbedding
 from models.encoders.gsta import GSTA
@@ -49,6 +50,11 @@ class Encoder(nn.Module):
         hidden_dim: int = 256,
         num_heads: int = 8,
         num_layers: int = 2,
+        window_sizes: tuple[int, ...] = (
+            2,
+            4,
+            8,
+        ),
         dropout: float = 0.1,
     ) -> None:
 
@@ -73,6 +79,7 @@ class Encoder(nn.Module):
                 TriATM(
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
+                    window_sizes=window_sizes,
                     dropout=dropout,
                 )
                 for _ in range(num_layers)
@@ -87,7 +94,7 @@ class Encoder(nn.Module):
         lane_features: torch.Tensor,
         positions: torch.Tensor,
         headings: torch.Tensor,
-        graph,
+        graph: GraphData | None,
         *,
         agent_mask: torch.Tensor | None = None,
         lane_mask: torch.Tensor | None = None,
@@ -97,6 +104,14 @@ class Encoder(nn.Module):
             positions,
             headings,
         )
+
+        ###########################################################################
+        # Attach relative geometry to graph
+        ###########################################################################
+
+        if graph is not None:
+
+            graph.edge_features = relative
 
         agent_features, lane_features = self.gsta(
             agent_features=agent_features,
@@ -112,9 +127,7 @@ class Encoder(nn.Module):
             agent_features, lane_features = layer(
                 agent_features=agent_features,
                 lane_features=lane_features,
-                relative=relative,
                 graph=graph,
-                positions=positions,
                 agent_mask=agent_mask,
                 lane_mask=lane_mask,
             )
