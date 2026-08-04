@@ -40,22 +40,22 @@ from scripts.train import (
 # Mini Configuration
 ###############################################################################
 
-TRAIN_SCENES = 2048
+TRAIN_SCENES = 64
 
-VAL_SCENES = 512
+VAL_SCENES = 16
 
-EPOCHS = 10
+EPOCHS = 1
 
 CHECKPOINT_ROOT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "mini"
+    / "mini_v2"
 )
 
 LOG_ROOT = (
     PROJECT_ROOT
     / "logs"
-    / "mini"
+    / "mini_v2"
 )
 
 ###############################################################################
