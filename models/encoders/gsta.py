@@ -26,7 +26,7 @@ so the existing encoder does not require modification.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Any
 
 import torch
 from torch import Tensor, nn
@@ -34,7 +34,7 @@ from torch import Tensor, nn
 from models.layers.attention import MultiHeadAttention
 from models.layers.feed_forward import FeedForward
 from models.layers.mlp import MLP
-from models.model_types import GraphData, RelativeFeatures
+from models.model_types import RelativeFeatures
 
 
 ###############################################################################
@@ -546,3 +546,114 @@ class GSTA(nn.Module):
 
         return self._scene_embedding_cache
 
+    ###########################################################################
+    # Forward
+    ###########################################################################
+
+    def forward(
+        self,
+        *,
+        agent_features: Tensor,
+        lane_features: Tensor,
+        relative: RelativeFeatures | None = None,
+        graph: Any = None,
+        agent_mask: Tensor | None = None,
+        lane_mask: Tensor | None = None,
+    ) -> tuple[
+        Tensor,
+        Tensor,
+    ]:
+        """
+        Global Spatio-Temporal Aggregation.
+
+        Parameters
+        ----------
+        agent_features
+            Shape (B, Na, D)
+
+        lane_features
+            Shape (B, Nl, D)
+
+        Returns
+        -------
+        Updated
+
+            agent_features
+
+            lane_features
+        """
+
+        #######################################################################
+        # 1. Temporal Self-Attention
+        #######################################################################
+
+        agent_features = self._temporal_self_attention(
+            agent_features,
+        )
+
+        #######################################################################
+        # 2. Spatial Self-Attention
+        #######################################################################
+
+        lane_features = self._spatial_self_attention(
+            lane_features,
+        )
+
+        #######################################################################
+        # 3. Bidirectional Cross Attention
+        #######################################################################
+
+        lane_features = self._agent_to_lane_cross_attention(
+            agent_features,
+            lane_features,
+        )
+
+        agent_features = self._lane_to_agent_cross_attention(
+            agent_features,
+            lane_features,
+        )
+
+        #######################################################################
+        # 4. Global Scene Tokens
+        #######################################################################
+
+        temporal_scene = self._temporal_query_attention(
+            agent_features,
+        )
+
+        spatial_scene = self._spatial_query_attention(
+            lane_features,
+        )
+
+        #######################################################################
+        # 5. Scene Embedding
+        #######################################################################
+
+        scene_embedding = self._scene_embedding(
+            temporal_scene,
+            spatial_scene,
+        )
+
+        self._scene_embedding_cache = scene_embedding
+
+        #######################################################################
+        # 6. Broadcast Scene Context
+        #######################################################################
+
+        scene_context = scene_embedding.mean(
+            dim=1,
+            keepdim=True,
+        )
+
+        agent_features = agent_features + scene_context
+
+        lane_features = lane_features + scene_context
+
+        #######################################################################
+        # Output
+        #######################################################################
+
+        return (
+            agent_features,
+            lane_features,
+        )

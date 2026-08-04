@@ -32,7 +32,7 @@ from models.attention.mspa import MSPA
 from models.attention.mhca import MHCA
 from models.attention.mmia import MMIA
 
-from models.model_types import GraphData
+from typing import Any
 
 
 class TriATM(nn.Module):
@@ -109,7 +109,7 @@ class TriATM(nn.Module):
         *,
         agent_features: Tensor,
         lane_features: Tensor,
-        graph: GraphData | None = None,
+        graph: Any | None = None,
         agent_mask: Tensor | None = None,
         lane_mask: Tensor | None = None,
     ) -> tuple[

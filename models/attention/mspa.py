@@ -19,13 +19,12 @@ Output shape is identical to input.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any
 
 from torch import Tensor, nn
 
 from models.layers.attention import MultiHeadAttention
 from models.layers.feed_forward import FeedForward
-from models.model_types import GraphData
 
 
 class MSPA(nn.Module):
@@ -104,39 +103,16 @@ class MSPA(nn.Module):
 
     def _build_attention_bias(
         self,
-        graph: Optional[GraphData],
-    ) -> Optional[Tensor]:
+        graph: Any = None,
+    ) -> Tensor | None:
         """
-        Convert relative feature embeddings into a per-head
-        attention bias.
+        Graph-aware attention bias.
 
-        Returns
-        -------
-        (B, H, N, N) or None
+        Temporarily disabled while integrating the
+        end-to-end DSTNet pipeline.
         """
 
-        if graph is None:
-            return None
-
-        embedding = graph.edge_features.embedding
-
-        if embedding is None:
-            return None
-
-        # (B,N,N,D) -> (B,N,N,H)
-        bias = self.relative_bias(
-            embedding,
-        )
-
-        # (B,N,N,H) -> (B,H,N,N)
-        bias = bias.permute(
-            0,
-            3,
-            1,
-            2,
-        )
-
-        return bias
+        return None
 
     ###########################################################################
     # Attention Mask
@@ -144,20 +120,16 @@ class MSPA(nn.Module):
 
     def _build_attention_mask(
         self,
-        graph: Optional[GraphData],
-    ) -> Optional[Tensor]:
+        graph: Any = None,
+    ) -> Tensor | None:
         """
-        Convert graph adjacency into an attention mask.
+        Graph attention mask.
 
-        Returns
-        -------
-        (B,N,N) or None
+        Temporarily disabled while integrating the
+        end-to-end DSTNet pipeline.
         """
 
-        if graph is None:
-            return None
-
-        return graph.adjacency.bool()
+        return None
 
     ###########################################################################
     # Forward
@@ -166,7 +138,7 @@ class MSPA(nn.Module):
     def forward(
         self,
         features: Tensor,
-        graph: Optional[GraphData] = None,
+        graph: Any = None,
     ) -> Tensor:
         """
         Multi-head Spatial Pattern Attention.
@@ -190,13 +162,9 @@ class MSPA(nn.Module):
             features,
         )
 
-        attention_mask = self._build_attention_mask(
-            graph,
-        )
+        attention_mask = None
 
-        attention_bias = self._build_attention_bias(
-            graph,
-        )
+        attention_bias = None
 
         x = self.attention(
             query=x,
