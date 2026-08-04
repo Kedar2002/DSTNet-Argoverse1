@@ -242,3 +242,100 @@ class MMIA(nn.Module):
             + (1.0 - alpha) * original
         )
 
+    ###########################################################################
+    # Forward
+    ###########################################################################
+
+    def forward(
+        self,
+        *,
+        agent_features: Tensor,
+        lane_features: Tensor,
+        agent_mask: Tensor | None = None,
+        lane_mask: Tensor | None = None,
+    ) -> tuple[
+        Tensor,
+        Tensor,
+    ]:
+        """
+        Bidirectional agent-lane interaction.
+
+        Parameters
+        ----------
+        agent_features
+            Shape (B,N,C)
+
+        lane_features
+            Shape (B,L,C)
+
+        Returns
+        -------
+        Updated
+
+            agent_features
+
+            lane_features
+        """
+
+        #######################################################################
+        # Cross Attention
+        #######################################################################
+
+        updated_agents = self._agent_to_lane_attention(
+            agent_features,
+            lane_features,
+            lane_mask,
+        )
+
+        updated_lanes = self._lane_to_agent_attention(
+            lane_features,
+            agent_features,
+            agent_mask,
+        )
+
+        #######################################################################
+        # Learnable Gated Fusion
+        #######################################################################
+
+        updated_agents = self._gated_fusion(
+            original=agent_features,
+            updated=updated_agents,
+            gate=self.agent_gate,
+        )
+
+        updated_lanes = self._gated_fusion(
+            original=lane_features,
+            updated=updated_lanes,
+            gate=self.lane_gate,
+        )
+
+        #######################################################################
+        # Feed Forward
+        #######################################################################
+
+        updated_agents = self.feed_forward(
+            updated_agents,
+        )
+
+        updated_lanes = self.feed_forward(
+            updated_lanes,
+        )
+
+        return (
+            updated_agents,
+            updated_lanes,
+        )
+
+    ###########################################################################
+    # Representation
+    ###########################################################################
+
+    def extra_repr(
+        self,
+    ) -> str:
+
+        return (
+            f"hidden_dim={self.hidden_dim}, "
+            f"num_heads={self.num_heads}"
+        )
+
