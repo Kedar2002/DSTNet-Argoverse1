@@ -81,6 +81,7 @@ class ScenePreprocessor:
             heading,
         )
 
+        # Build the geometric interaction graph using the# normalized scene representation.
         graph = self.graph_builder.build(scene)
 
         return SceneData(
@@ -178,6 +179,7 @@ class ScenePreprocessor:
                     "speed": speed,
                     "acceleration": acceleration,
                     "heading": headings,
+                    "last_position": observed[-1],
                 }
             )
 
@@ -251,6 +253,7 @@ class ScenePreprocessor:
                 {
                     "lane_id": lane.lane_id,
                     "centerline": centerline,
+                    "centroid": centerline.mean(axis=0),
                     "direction": direction,
                     "is_intersection": lane.is_intersection,
                     "turn_direction": lane.turn_direction,

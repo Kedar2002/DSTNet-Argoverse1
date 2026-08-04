@@ -48,6 +48,8 @@ class RelativeFeatures:
 
     embedding: torch.Tensor
 
+    valid_mask: torch.Tensor | None = None
+
 
 ###############################################################################
 # Graph Data
@@ -57,14 +59,31 @@ class RelativeFeatures:
 @dataclass(slots=True)
 class GraphData:
     """
-    Graph representation used by the encoder.
+    Graph used by the encoder and Tri-ATM.
     """
 
-    adjacency: torch.Tensor
+    ##################################################################
+    # Connectivity
+    ##################################################################
 
     edge_index: torch.Tensor
+    adjacency: torch.Tensor
+
+    ##################################################################
+    # Geometry
+    ##################################################################
 
     edge_features: RelativeFeatures
+
+    ##################################################################
+    # Multi-scale spatial masks
+    ##################################################################
+
+    radius_masks: list[torch.Tensor] | None = None
+
+    ##################################################################
+    # Padding masks
+    ##################################################################
 
     agent_mask: torch.Tensor | None = None
 
@@ -117,6 +136,8 @@ class EncodedGraph:
     agent_features: torch.Tensor
 
     lane_features: torch.Tensor
+
+    scene_embedding: torch.Tensor | None
 
     graph: GraphData
 

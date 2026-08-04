@@ -80,6 +80,14 @@ class SceneData:
     graph: GraphData
 
     ###########################################################################
+    # Cached Geometry
+    ###########################################################################
+
+    agent_positions: np.ndarray | None = None
+
+    lane_positions: np.ndarray | None = None
+
+    ###########################################################################
     # Validation
     ###########################################################################
 
@@ -97,6 +105,18 @@ class SceneData:
             raise TypeError(
                 "heading must be a float."
             )
+
+        #######################################################################
+        # Cache commonly used geometry
+        #######################################################################
+
+        if self.agent_positions is None:
+
+            self.agent_positions = self.graph.agent_positions
+
+        if self.lane_positions is None:
+
+            self.lane_positions = self.graph.lane_positions
 
     ###########################################################################
     # Properties
@@ -166,11 +186,16 @@ class SceneData:
         return {
             "sequence_id": self.sequence_id,
             "city": self.city,
+
             "num_agents": self.num_agents,
             "num_lanes": self.num_lanes,
+
             "agent_edges": self.num_agent_edges,
             "lane_edges": self.num_lane_edges,
             "lane_agent_edges": self.num_lane_agent_edges,
+
+            "agent_radius": self.graph.agent_radius,
+            "lane_radius": self.graph.lane_radius,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -181,10 +206,16 @@ class SceneData:
         return {
             "sequence_id": self.sequence_id,
             "city": self.city,
+
             "origin": self.origin,
             "heading": self.heading,
+
             "agents": self.agents,
             "lanes": self.lanes,
+
+            "agent_positions": self.agent_positions,
+            "lane_positions": self.lane_positions,
+
             "graph": self.graph,
         }
 
