@@ -123,7 +123,7 @@ TEST_ROOT = Path(
 
 MAP_ROOT = Path(
     "/kaggle/input/datasets/kedaradhikari/"
-    "argoverse1-hdmapss/"
+    "argoverse1-hd-mapss/"
     "hd_maps/map_files"
 )
 
