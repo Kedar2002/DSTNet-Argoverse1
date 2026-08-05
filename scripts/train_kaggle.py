@@ -122,7 +122,7 @@ TEST_ROOT = (
 )
 
 MAP_ROOT = (
-    "/kaggle/input/datasets/kedaradhikari/argoverse1-hdmapss/"
+    "/kaggle/input/datasets/kedaradhikari/argoverse1-hdmaps/"
     "hd_maps/map_files"
 )
 
