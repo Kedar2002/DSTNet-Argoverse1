@@ -103,26 +103,27 @@ from engine.utils import move_to_device
 # Configuration
 ###############################################################################
 
-TRAIN_ROOT = (
+TRAIN_ROOT = Path(
     "/kaggle/input/datasets/narendarmallireddy/"
     "argoverse1-motion-dataset/"
     "forecasting_train_v1.1/train/data"
 )
 
-VAL_ROOT = (
+VAL_ROOT = Path(
     "/kaggle/input/datasets/narendarmallireddy/"
     "argoverse1-motion-dataset/"
     "forecasting_val_v1.1/val/data"
 )
 
-TEST_ROOT = (
+TEST_ROOT = Path(
     "/kaggle/input/datasets/narendarmallireddy/"
     "argoverse1-motion-dataset/"
     "forecasting_test_v1.1/test_obs/data"
 )
 
-MAP_ROOT = (
-    "/kaggle/input/datasets/kedaradhikari/argoverse1-hdmapss/"
+MAP_ROOT = Path(
+    "/kaggle/input/datasets/kedaradhikari/"
+    "argoverse1-hdmapss/"
     "hd_maps/map_files"
 )
 
@@ -152,6 +153,9 @@ DEVICE = torch.device(
     else "cpu"
 
 )
+
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
 
 BATCH_SIZE = 8
 
@@ -1642,109 +1646,19 @@ def main() -> None:
     )
 
     train_dataset = build_dataset(
-
         TRAIN_ROOT,
-
         train=True,
-
     )
 
     val_dataset = build_dataset(
-
         VAL_ROOT,
-
         train=False,
-
     )
-
-    print(
-        f"Training Scenes   : {len(train_dataset):,}"
-    )
-
-    print(
-        f"Validation Scenes : {len(val_dataset):,}"
-    )
-
-    ###########################################################################
-    # DataLoaders
-    ###########################################################################
-
-    print_section(
-        "Building DataLoaders"
-    )
-
-    train_loader = build_dataloader(
-
-        train_dataset,
-
-        train=True,
-
-    )
-
-    val_loader = build_dataloader(
-
-        val_dataset,
-
-        train=False,
-
-    )
-
-    print(
-        f"Training Batches   : {len(train_loader):,}"
-    )
-
-    print(
-        f"Validation Batches : {len(val_loader):,}"
-    )
-
-    ###########################################################################
-    # Model
-    ###########################################################################
-
-    model = build_model()
-
-    ###########################################################################
-    # Optimizer / Scheduler / Loss
-    ###########################################################################
-
-    optimizer, scheduler, criterion = (
-
-        build_training_components(
-
-            model,
-
-            total_steps=len(train_loader),
-
-        )
-
-    )
-
-    ###########################################################################
-    # Resume
-    ###########################################################################
-
-    start_epoch, best_metric = load_checkpoint(
-
-        model,
-
-        optimizer,
-
-        scheduler,
-
-    )
-
-    ###########################################################################
-    # Run Training
-    ###########################################################################
 
     run_training(
-
         train_dataset=train_dataset,
-
         val_dataset=val_dataset,
-
         epochs=EPOCHS,
-
     )
 
 
