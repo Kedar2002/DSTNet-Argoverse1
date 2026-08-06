@@ -10,6 +10,7 @@ Argoverse dataset during training.
 from __future__ import annotations
 
 import pickle
+import os
 import shutil
 from pathlib import Path
 
@@ -92,8 +93,10 @@ class CacheManager:
             scene.sequence_id
         )
 
+        temp_path = path.with_suffix(".tmp")
+
         with open(
-            path,
+            temp_path,
             "wb",
         ) as f:
 
@@ -103,7 +106,13 @@ class CacheManager:
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
 
-        ###########################################################################
+            f.flush()
+
+            os.fsync(f.fileno())
+
+        temp_path.replace(path)
+
+    ###########################################################################
     # Load
     ###########################################################################
 
@@ -116,12 +125,30 @@ class CacheManager:
             sequence_id,
         )
 
-        with open(
-            path,
-            "rb",
-        ) as f:
+        try:
 
-            scene = pickle.load(f)
+            with open(
+                path,
+                "rb",
+            ) as f:
+
+                scene = pickle.load(f)
+
+        except (
+            EOFError,
+            pickle.UnpicklingError,
+        ):
+
+            print(
+                f"[Cache] Corrupted cache detected: {path.name}"
+            )
+
+            path.unlink(missing_ok=True)
+
+            raise RuntimeError(
+                f"Corrupted cache removed for {sequence_id}. "
+                f"Please regenerate this cache."
+            )
 
         if not isinstance(
             scene,
