@@ -169,7 +169,7 @@ WEIGHT_DECAY = 1e-2
 
 SAVE_EVERY = 1
 
-GRADIENT_CLIP = 5.0
+GRADIENT_CLIP = 2.0
 
 ###############################################################################
 # Early Stopping
@@ -809,6 +809,8 @@ def train_one_epoch(
 
     model.train()
 
+    torch.autograd.set_detect_anomaly(True)  # Remove when training
+
     running_loss = 0.0
 
     num_batches = len(dataloader)
@@ -899,10 +901,58 @@ def train_one_epoch(
         loss = losses["loss"]
 
         ###############################################################
+        # Numerical Stability Checks
+        ###############################################################
+
+        for loss_name, loss_value in losses.items():
+
+            if not torch.isfinite(loss_value):
+
+                print(f"\n[ERROR] {loss_name} became NaN/Inf at batch {batch_index}")
+
+                optimizer.zero_grad(set_to_none=True)
+
+                continue
+
+        if not torch.isfinite(loss):
+
+            print(f"\n[ERROR] Total loss became NaN/Inf at batch {batch_index}")
+
+            optimizer.zero_grad(set_to_none=True)
+
+            continue
+
+        ###############################################################
         # Backward
         ###############################################################
 
         loss.backward()
+
+        ###############################################################
+        # Gradient Validation
+        ###############################################################
+
+        invalid_gradient = False
+
+        for name, parameter in model.named_parameters():
+
+            if parameter.grad is None:
+
+                continue
+
+            if not torch.isfinite(parameter.grad).all():
+
+                print(f"\n[ERROR] Invalid gradient detected in: {name}")
+
+                invalid_gradient = True
+
+                break
+
+        if invalid_gradient:
+
+            optimizer.zero_grad(set_to_none=True)
+
+            continue
 
         ###############################################################
         # Gradient clipping
@@ -914,29 +964,73 @@ def train_one_epoch(
 
             max_norm=GRADIENT_CLIP,
 
+            error_if_nonfinite=False,
+
         )
 
         ###########################################################################
         # Gradient Monitoring
         ###########################################################################
 
-        if torch.isnan(gradient_norm):
+        if not torch.isfinite(gradient_norm):
 
-            raise RuntimeError(
+            print(
 
-                "Gradient norm became NaN."
+                f"\n[ERROR] Invalid gradient norm at batch {batch_index}"
 
             )
+
+            optimizer.zero_grad(set_to_none=True)
+
+            continue
 
         if gradient_norm > 100:
 
             print(
-
-                f"\n[Warning] Large gradient norm: "
-
-                f"{gradient_norm:.2f}"
-
+            
+                f"\n[WARNING] Large gradient norm: {float(gradient_norm):.2f}"
+        
             )
+        
+            print(
+            
+                f"Epoch={epoch} Batch={batch_index}"
+        
+            )
+        
+            print(
+            
+                f"Proposal={losses['proposal_loss']:.4f} "
+        
+                f"Cls={losses['classification_loss']:.4f} "
+        
+                f"Score={losses['score_loss']:.4f} "
+        
+                f"Ref={losses['refinement_loss']:.4f}"
+        
+            )
+
+        ###############################################################
+        # Parameter Validation
+        ###############################################################
+
+        invalid_parameter = False
+
+        for name, parameter in model.named_parameters():
+
+            if not torch.isfinite(parameter).all():
+
+                print(f"\n[ERROR] Parameter became NaN/Inf: {name}")
+
+                invalid_parameter = True
+
+                break
+
+        if invalid_parameter:
+
+            optimizer.zero_grad(set_to_none=True)
+
+            continue
 
         ###############################################################
         # Optimizer
