@@ -1,17 +1,31 @@
 """
 losses.proposal_loss
 
-Loss for supervising coarse trajectory proposals.
+DSTNet coarse proposal regression loss.
 
-This loss is applied before the Adaptive Anchor-based
-Refinement (AAR) module.
+Paper
+-----
+DSTNet, Section III-G, Eq. (28) and Eq. (30)
 
-Each predicted mode is compared against the ground-truth
-trajectory, and only the best-matching proposal contributes
-to the regression loss.
+Winner-Takes-All selection is performed using the minimum
+endpoint distance.
 
-This follows the common best-of-K supervision strategy used
-by multimodal trajectory prediction methods.
+The selected proposal is then optimized using Huber loss.
+
+Current tensor contract
+-----------------------
+
+Prediction trajectories:
+
+    (B,N,H,K,T,2)
+
+Ground truth:
+
+    (B,N,T,2)
+
+Best mode:
+
+    (B,N,H)
 """
 
 from __future__ import annotations
@@ -22,36 +36,42 @@ from torch import nn
 
 from models.model_types import Prediction
 
+from losses.targets import (
+    best_mode_from_endpoint,
+    validate_trajectory_shapes,
+)
+
+
 class ProposalLoss(nn.Module):
     """
-    Proposal regression loss.
+    DSTNet proposal regression loss.
 
-    Inputs
-    ------
+    Implements:
 
-    prediction
+        k_best = argmin_k endpoint_distance
 
-        trajectories
-            (B,N,K,T,2)
+    followed by:
 
-    ground_truth
-
-        (B,N,T,2)
-
-    Returns
-    -------
-
-    scalar loss
+        L_proposal =
+            L_Huber(
+                Y^(0)_{k_best},
+                G
+            )
     """
 
     def __init__(
         self,
-        reduction: str = "mean",
+        delta: float = 1.0,
     ) -> None:
 
         super().__init__()
 
-        self.reduction = reduction
+        if delta <= 0.0:
+            raise ValueError(
+                "delta must be positive."
+            )
+
+        self.delta = float(delta)
 
     def forward(
         self,
@@ -60,63 +80,124 @@ class ProposalLoss(nn.Module):
         *,
         return_best_mode: bool = False,
     ):
+        """
+        Parameters
+        ----------
+        prediction
+            DSTNet coarse prediction.
+
+        ground_truth
+            Shape:
+
+                (B,N,T,2)
+
+        return_best_mode
+            If True, also return the WTA mode indices.
+
+        Returns
+        -------
+        loss
+
+            Scalar Huber proposal loss.
+
+        or
+
+        loss, best_mode
+
+            where best_mode has shape (B,N,H).
+        """
+
+        if not isinstance(
+            prediction,
+            Prediction,
+        ):
+            raise TypeError(
+                "prediction must be a Prediction."
+            )
 
         trajectories = prediction.trajectories
 
-        if trajectories.ndim != 5:
-
-            raise ValueError(
-                "Prediction must have shape (B,N,K,T,2)."
-            )
-
-        if ground_truth.ndim != 4:
-
-            raise ValueError(
-                "Ground truth must have shape (B,N,T,2)."
-            )
-
-        ###############################################################
-        # Expand GT over modes
-        ###############################################################
-
-        gt = ground_truth.unsqueeze(2)
-
-        gt = gt.expand_as(
+        validate_trajectory_shapes(
             trajectories,
+            ground_truth,
         )
 
-        ###############################################################
-        # L2 error for every mode
-        ###############################################################
+        #######################################################################
+        # Winner-Takes-All selection
+        #######################################################################
 
-        displacement = torch.norm(
-            trajectories - gt,
-            dim=-1,
+        _, best_mode = best_mode_from_endpoint(
+            trajectories,
+            ground_truth,
         )
 
-        trajectory_error = displacement.mean(
-            dim=-1,
+        #######################################################################
+        # Dimensions
+        #######################################################################
+
+        B, N, H, K, T, C = trajectories.shape
+
+        #######################################################################
+        # Gather the winning mode
+        #######################################################################
+
+        gather_index = (
+            best_mode
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+            .expand(
+                B,
+                N,
+                H,
+                1,
+                T,
+                C,
+            )
         )
 
-        ###############################################################
-        # Best proposal
-        ###############################################################
+        best_prediction = torch.gather(
+            trajectories,
+            dim=3,
+            index=gather_index,
+        ).squeeze(3)
 
-        best_error, best_mode = trajectory_error.min(
-            dim=-1,
+        #######################################################################
+        # Expand ground truth over H
+        #######################################################################
+
+        gt = (
+            ground_truth
+            .unsqueeze(2)
+            .expand(
+                B,
+                N,
+                H,
+                T,
+                C,
+            )
         )
 
-        if self.reduction == "mean":
-            loss = best_error.mean()
+        #######################################################################
+        # Huber regression
+        #######################################################################
 
-        elif self.reduction == "sum":
-            loss = best_error.sum()
+        loss = F.huber_loss(
+            best_prediction,
+            gt,
+            reduction="mean",
+            delta=self.delta,
+        )
 
-        else:
-            loss = best_error
+        #######################################################################
+        # Return
+        #######################################################################
 
         if return_best_mode:
-            return loss, best_mode
+            return (
+                loss,
+                best_mode,
+            )
 
         return loss
 
@@ -126,6 +207,10 @@ class ProposalLoss(nn.Module):
 
         return (
             "ProposalLoss("
-            f"reduction={self.reduction})"
+            f"delta={self.delta})"
         )
 
+
+__all__ = [
+    "ProposalLoss",
+]

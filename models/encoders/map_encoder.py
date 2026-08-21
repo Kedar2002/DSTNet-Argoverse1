@@ -1,7 +1,7 @@
 """
-models.encoders.lane_encoder
+models.encoders.map_encoder
 
-Lane encoder for DSTNet.
+Map encoder for DSTNet.
 
 This module projects sampled lane centerlines into the latent
 feature space using a two-layer MLP.
@@ -23,7 +23,7 @@ from torch import nn
 from models.layers.mlp import MLP
 
 
-class LaneEncoder(nn.Module):
+class MapEncoder(nn.Module):
     """
     Encode lane centerlines.
 
@@ -141,7 +141,7 @@ class LaneEncoder(nn.Module):
     def __repr__(self) -> str:
 
         return (
-            "LaneEncoder("
+            "MapEncoder("
             f"num_points={self._num_points}, "
             f"hidden_dim={self._hidden_dim})"
         )

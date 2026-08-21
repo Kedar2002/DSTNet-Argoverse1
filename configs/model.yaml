@@ -8,9 +8,9 @@ model:
 
   num_heads: 8
 
-  dropout: 0.1
+  num_encoder_layers: 2
 
-  tri_atm_layers: 2
+  dropout: 0.1
 
   num_modes: 6
 
@@ -20,18 +20,31 @@ model:
 
   refinement_iterations: 2
 
-  enable_bezier: true
+  interaction_radius: 30.0
 
   mspa:
 
-    radii: [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 60.0, inf]
+    radii:
+      - 2.0
+      - 5.0
+      - 10.0
+      - 20.0
+      - 30.0
+      - 40.0
+      - 60.0
+      - inf
 
     feature_dropout: 0.1
 
   mhca:
 
-    window_sizes: [2, 4, 8]
+    window_sizes:
+      - 2
+      - 4
+      - 8
 
     causal: true
 
     use_multi_scale: true
+
+  enable_bezier: true

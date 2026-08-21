@@ -1,62 +1,65 @@
 """
 scripts.train
 
-Production training script for DSTNet.
+Production training entry point for DSTNet.
 
 Responsibilities
 ----------------
-- Training
+- Configuration loading
+- Dataset construction
+- DataLoader construction
+- Model construction
+- Loss construction
+- Optimizer construction
+- Scheduler construction
+- Training through engine.Trainer
 - Validation
 - Checkpointing
-- Resume Training
-- CSV Logging
-- Learning Rate Scheduling
-- Best Model Saving
+- Resume support
+- Epoch logging
 
-Pipeline
+Configuration
+-------------
+All experiment/runtime parameters are obtained from the repository
+configuration system.
 
-Training Dataset
-        │
-        ▼
-Validation Dataset
-        │
-        ▼
-DataLoader
-        │
-        ▼
-DSTNet
-        │
-        ▼
-Forward
-        │
-        ▼
-Loss
-        │
-        ▼
-Backward
-        │
-        ▼
-Optimizer
-        │
-        ▼
-Scheduler
-        │
-        ▼
-Validation
-        │
-        ▼
-Checkpoint
+Base configuration:
+    configs/dataset.yaml
+    configs/model.yaml
+    configs/training.yaml
+    configs/runtime.yaml
+
+Optional overrides:
+    configs/paper.yaml
+    configs/debug.yaml
+    configs/local_cpu.yaml
+
+Current DSTNet model contract
+-----------------------------
+DSTNet.forward(
+    *,
+    agent_trajectories,
+    lane_centerlines,
+    positions,
+    graph,
+    agent_mask=None,
+    lane_mask=None,
+)
+
+No ``headings`` argument is passed to DSTNet.
 """
 
 from __future__ import annotations
 
-import csv
+import random
 import sys
-import time
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
+
 
 ###############################################################################
 # Repository Root
@@ -67,8 +70,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+
 ###############################################################################
-# Dataset
+# Project Imports
 ###############################################################################
 
 from datasets.argoverse_dataset import ArgoverseDataset
@@ -78,180 +82,299 @@ from datasets.map_loader import MapLoader
 from datasets.preprocess import ScenePreprocessor
 from datasets.scene_parser import SceneParser
 from datasets.transforms import (
-    build_train_transform,
     build_eval_transform,
+    build_train_transform,
 )
-
-###############################################################################
-# Model
-###############################################################################
-
-from models.dstnet import DSTNet
-
-###############################################################################
-# Training
-###############################################################################
-
-from losses.total_loss import TotalLoss
 
 from engine.optimizer import build_optimizer
 from engine.scheduler import build_scheduler
-from engine.evaluator import Evaluator
-from engine.utils import move_to_device
+from engine.trainer import Trainer
+
+from losses.total_loss import TotalLoss
+
+from models.dstnet import DSTNet
+
+from utils.config import load_config
+
+
+###############################################################################
+# Configuration Helpers
+###############################################################################
+
+
+def _require_attribute(
+    obj: Any,
+    path: str,
+) -> Any:
+    """
+    Retrieve a nested configuration attribute.
+
+    Parameters
+    ----------
+    obj
+        Configuration object.
+
+    path
+        Dot-separated path, e.g.
+        ``"dataset.train_dir"``.
+
+    Returns
+    -------
+    Any
+        Configuration value.
+
+    Raises
+    ------
+    AttributeError
+        If the requested configuration entry does not exist.
+    """
+
+    current = obj
+
+    for part in path.split("."):
+
+        if not hasattr(
+            current,
+            part,
+        ):
+
+            raise AttributeError(
+                "Required configuration entry "
+                f"'{path}' was not found."
+            )
+
+        current = getattr(
+            current,
+            part,
+        )
+
+    return current
+
+
+def _optional_attribute(
+    obj: Any,
+    paths: tuple[str, ...],
+    default: Any,
+) -> Any:
+    """
+    Retrieve the first available configuration entry.
+
+    This is used only where the repository configuration may legitimately
+    use one of several established names.
+
+    Parameters
+    ----------
+    obj
+        Configuration object.
+
+    paths
+        Candidate dot-separated paths.
+
+    default
+        Value returned if none of the paths exists.
+    """
+
+    for path in paths:
+
+        current = obj
+
+        found = True
+
+        for part in path.split("."):
+
+            if not hasattr(
+                current,
+                part,
+            ):
+
+                found = False
+
+                break
+
+            current = getattr(
+                current,
+                part,
+            )
+
+        if found:
+
+            return current
+
+    return default
+
 
 ###############################################################################
 # Configuration
 ###############################################################################
 
-MAP_ROOT = (
-    PROJECT_ROOT
-    / "data"
-    / "argoverse1"
-    / "hd_maps"
-    / "map_files"
-)
+CFG = load_config()
 
-TRAIN_ROOT = (
-    PROJECT_ROOT
-    / "data"
-    / "argoverse1"
-    / "train"
-)
-
-VAL_ROOT = (
-    PROJECT_ROOT
-    / "data"
-    / "argoverse1"
-    / "val"
-)
-
-CACHE_ROOT = (
-    PROJECT_ROOT
-    / "cache"
-)
-
-CHECKPOINT_ROOT = (
-    PROJECT_ROOT
-    / "checkpoints"
-    / "training"
-)
-
-LOG_ROOT = (
-    PROJECT_ROOT
-    / "logs"
-)
 
 ###############################################################################
-# Hyperparameters
+# Reproducibility
 ###############################################################################
 
-DEVICE = torch.device(
 
-    "cuda"
-
-    if torch.cuda.is_available()
-
-    else "cpu"
-
-)
-
-BATCH_SIZE = 2
-
-NUM_WORKERS = 0
-
-EPOCHS = 30
-
-LEARNING_RATE = 1e-4
-
-WEIGHT_DECAY = 1e-2
-
-SAVE_EVERY = 1
-
-GRADIENT_CLIP = 5.0
-
-###############################################################################
-# Early Stopping
-###############################################################################
-
-EARLY_STOPPING = True
-
-PATIENCE = 8
-
-###############################################################################
-# Utilities
-###############################################################################
-
-def print_header(
-    title: str,
+def set_random_seed(
+    seed: int,
+    deterministic: bool,
 ) -> None:
+    """
+    Configure random seeds.
 
-    print()
+    Parameters
+    ----------
+    seed
+        Global random seed.
 
-    print("=" * 80)
+    deterministic
+        Whether deterministic PyTorch behaviour should be requested.
+    """
 
-    print(title)
+    random.seed(seed)
 
-    print("=" * 80)
+    np.random.seed(seed)
 
+    torch.manual_seed(seed)
 
-def print_section(
-    title: str,
-) -> None:
+    if torch.cuda.is_available():
 
-    print()
+        torch.cuda.manual_seed_all(seed)
 
-    print(title)
+    if deterministic:
 
-    print("-" * 80)
+        torch.backends.cudnn.deterministic = True
+
+        torch.backends.cudnn.benchmark = False
+
+    else:
+
+        torch.backends.cudnn.deterministic = False
 
 
 ###############################################################################
-# Parameter Counter
+# Device
 ###############################################################################
 
-def count_parameters(
-    model,
-):
 
-    total = sum(
+def resolve_device(
+    requested: str,
+) -> torch.device:
+    """
+    Resolve the configured device.
 
-        parameter.numel()
+    ``auto`` selects CUDA when available, otherwise CPU.
+    """
 
-        for parameter in model.parameters()
+    requested = str(
+        requested
+    ).lower()
 
+    if requested == "auto":
+
+        return torch.device(
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
+
+    if requested == "cuda":
+
+        if not torch.cuda.is_available():
+
+            raise RuntimeError(
+                "Configuration requested CUDA, "
+                "but CUDA is not available."
+            )
+
+        return torch.device(
+            "cuda"
+        )
+
+    return torch.device(
+        requested
     )
 
-    trainable = sum(
 
-        parameter.numel()
+###############################################################################
+# Paths
+###############################################################################
 
-        for parameter in model.parameters()
 
-        if parameter.requires_grad
+def resolve_path(
+    path_value: str | Path,
+) -> Path:
+    """
+    Resolve a repository-relative configuration path.
 
+    Absolute paths are returned unchanged.
+    """
+
+    path = Path(
+        path_value
     )
 
-    return total, trainable
+    if path.is_absolute():
+
+        return path
+
+    return (
+        PROJECT_ROOT
+        / path
+    ).resolve()
 
 
 ###############################################################################
-# Scene Preprocessor Builder
+# Dataset / Preprocessing
 ###############################################################################
 
-def build_preprocessor():
+
+def build_preprocessor() -> ScenePreprocessor:
+    """
+    Build ScenePreprocessor entirely from dataset configuration.
+    """
+
+    observation_steps = int(
+        _require_attribute(
+            CFG,
+            "dataset.observation_steps",
+        )
+    )
+
+    prediction_steps = int(
+        _require_attribute(
+            CFG,
+            "dataset.prediction_steps",
+        )
+    )
+
+    map_sample_points = int(
+        _require_attribute(
+            CFG,
+            "dataset.map_sample_points",
+        )
+    )
+
+    spatial_radius = float(
+        _require_attribute(
+            CFG,
+            "dataset.spatial_radius",
+        )
+    )
+
+    map_radius = float(
+        _require_attribute(
+            CFG,
+            "dataset.map_radius",
+        )
+    )
 
     return ScenePreprocessor(
-
-        observation_steps=20,
-
-        prediction_steps=30,
-
-        lane_sample_points=20,
-
-        agent_radius=30.0,
-
-        lane_radius=30.0,
-
+        observation_steps=observation_steps,
+        prediction_steps=prediction_steps,
+        map_sample_points=map_sample_points,
+        spatial_radius=spatial_radius,
+        map_radius=map_radius,
     )
 
 
@@ -259,13 +382,42 @@ def build_preprocessor():
 # Dataset Builder
 ###############################################################################
 
+
 def build_dataset(
     root: Path,
+    *,
     train: bool,
-):
+) -> ArgoverseDataset:
+    """
+    Construct one Argoverse dataset split.
+
+    All dataset-related paths and preprocessing parameters originate
+    from configuration.
+    """
+
+    map_root = resolve_path(
+        _require_attribute(
+            CFG,
+            "dataset.root",
+        )
+    )
+
+    #
+    # The dataset root is the repository's Argoverse-1 directory.
+    #
+    # HD maps are stored below:
+    #
+    #     data/argoverse1/hd_maps/map_files
+    #
+    #
+    map_root = (
+        map_root
+        / "hd_maps"
+        / "map_files"
+    )
 
     map_loader = MapLoader(
-        map_root=MAP_ROOT,
+        map_root=map_root,
     )
 
     parser = SceneParser(
@@ -274,9 +426,51 @@ def build_dataset(
 
     preprocessor = build_preprocessor()
 
-    cache = CacheManager(
-        CACHE_ROOT,
+    cache_enabled = bool(
+        _optional_attribute(
+            CFG,
+            (
+                "cache.enabled",
+            ),
+            True,
+        )
     )
+
+    cache_rebuild = bool(
+        _optional_attribute(
+            CFG,
+            (
+                "cache.rebuild",
+            ),
+            False,
+        )
+    )
+
+    cache_root = resolve_path(
+        _optional_attribute(
+            CFG,
+            (
+                "dataset.cache_dir",
+            ),
+            "data/argoverse1/cache",
+        )
+    )
+
+    cache = None
+
+    if cache_enabled:
+
+        cache = CacheManager(
+            cache_root,
+        )
+
+        #
+        # CacheManager currently controls its own cache behaviour.
+        # ``cache_rebuild`` is therefore retained here as configuration
+        # metadata rather than passed as an unsupported constructor
+        # argument.
+        #
+        _ = cache_rebuild
 
     transform = (
 
@@ -285,1468 +479,757 @@ def build_dataset(
         if train
 
         else build_eval_transform()
-
     )
 
-    dataset = ArgoverseDataset(
-
+    return ArgoverseDataset(
         root=root,
-
         parser=parser,
-
         preprocessor=preprocessor,
-
         transform=transform,
-
         cache=cache,
-
     )
 
-    return dataset
-
 
 ###############################################################################
-# DataLoader Builder
+# DataLoader
 ###############################################################################
+
 
 def build_dataloader(
-    dataset,
+    dataset: ArgoverseDataset,
+    *,
     train: bool,
-):
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+) -> DataLoader:
+    """
+    Construct a DataLoader from runtime/training configuration.
+    """
 
     return DataLoader(
-
         dataset,
-
-        batch_size=BATCH_SIZE,
-
+        batch_size=batch_size,
         shuffle=train,
-
-        num_workers=NUM_WORKERS,
-
+        num_workers=num_workers,
         collate_fn=collate_fn,
-
-        pin_memory=False,
-
+        pin_memory=pin_memory,
         drop_last=False,
-
     )
 
 
 ###############################################################################
-# Model Builder
+# Model
 ###############################################################################
 
-def build_model():
 
-    model = DSTNet()
+def build_model() -> DSTNet:
+    """
+    Build DSTNet from model configuration.
 
-    model.to(
-        DEVICE,
+    The constructor arguments are explicitly mapped to the current
+    DSTNet implementation.
+    """
+
+    observation_steps = int(
+        _require_attribute(
+            CFG,
+            "dataset.observation_steps",
+        )
     )
 
-    total, trainable = count_parameters(
-        model,
+    prediction_steps = int(
+        _require_attribute(
+            CFG,
+            "dataset.prediction_steps",
+        )
     )
 
-    print_section(
-        "Model"
+    lane_points = int(
+        _require_attribute(
+            CFG,
+            "dataset.lane_sample_points",
+        )
     )
 
-    print(
-        f"Device               : {DEVICE}"
+    hidden_dim = int(
+        _require_attribute(
+            CFG,
+            "model.hidden_dim",
+        )
     )
 
-    print(
-        f"Total Parameters     : {total:,}"
+    num_heads = int(
+        _require_attribute(
+            CFG,
+            "model.num_heads",
+        )
     )
 
-    print(
-        f"Trainable Parameters : {trainable:,}"
+    num_encoder_layers = int(
+        _require_attribute(
+            CFG,
+            "model.num_encoder_layers",
+        )
+    )
+
+    num_modes = int(
+        _require_attribute(
+            CFG,
+            "model.num_modes",
+        )
+    )
+
+    refinement_iterations = int(
+        _require_attribute(
+            CFG,
+            "model.refinement_iterations",
+        )
+    )
+
+    dropout = float(
+        _optional_attribute(
+            CFG,
+            (
+                "model.dropout",
+            ),
+            0.1,
+        )
+    )
+
+    model = DSTNet(
+        observation_steps=observation_steps,
+        prediction_steps=prediction_steps,
+        lane_points=lane_points,
+        hidden_dim=hidden_dim,
+        num_heads=num_heads,
+        num_encoder_layers=num_encoder_layers,
+        num_modes=num_modes,
+        refinement_iterations=refinement_iterations,
+        dropout=dropout,
     )
 
     return model
 
 
 ###############################################################################
-# Training Component Builder
+# Parameter Count
 ###############################################################################
 
-def build_training_components(
-    model,
-    total_steps: int,
-):
 
-    optimizer = build_optimizer(
+def count_parameters(
+    model: torch.nn.Module,
+) -> tuple[int, int]:
+    """
+    Return total and trainable parameter counts.
+    """
 
-        model=model,
-
-        optimizer="adamw",
-
-        learning_rate=LEARNING_RATE,
-
-        weight_decay=WEIGHT_DECAY,
-
+    total = sum(
+        parameter.numel()
+        for parameter in model.parameters()
     )
 
-    scheduler = build_scheduler(
-
-        optimizer,
-
-        scheduler="cosine",
-
-        total_steps=total_steps * EPOCHS,
-
+    trainable = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
     )
-
-    criterion = TotalLoss()
 
     return (
-
-        optimizer,
-
-        scheduler,
-
-        criterion,
-
+        total,
+        trainable,
     )
 
 
 ###############################################################################
-# Directory Creation
+# Loss
 ###############################################################################
 
-def create_directories():
 
-    CHECKPOINT_ROOT.mkdir(
-
-        parents=True,
-
-        exist_ok=True,
-
-    )
-
-    LOG_ROOT.mkdir(
-
-        parents=True,
-
-        exist_ok=True,
-
-    )
-
-###############################################################################
-# Checkpoint Utilities
-###############################################################################
-
-LATEST_CHECKPOINT = (
-    CHECKPOINT_ROOT
-    / "latest.pth"
-)
-
-BEST_CHECKPOINT = (
-    CHECKPOINT_ROOT
-    / "best.pth"
-)
-
-CSV_LOG = (
-    LOG_ROOT
-    / "training_log.csv"
-)
-
-
-###############################################################################
-# Save Checkpoint
-###############################################################################
-
-def save_checkpoint(
-    *,
-    epoch: int,
-    model: DSTNet,
-    optimizer,
-    scheduler,
-    train_loss: float,
-    val_metrics: dict[str, float],
-    best: bool = False,
-) -> None:
+def build_criterion() -> TotalLoss:
     """
-    Save training checkpoint.
+    Build TotalLoss from configuration.
+
+    The default values exactly match the current TotalLoss contract:
+
+        proposal       = 1.0
+        classification = 1.0
+        score          = 0.1
+        refinement     = 1.0
     """
 
-    checkpoint = {
-
-        "epoch": epoch,
-
-        "train_loss": train_loss,
-
-        "val_metrics": val_metrics,
-
-        "best_metric": val_metrics.get(
-            "minADE",
-            float("inf"),
-        ),
-
-        "model_state_dict": model.state_dict(),
-
-        "optimizer_state_dict": optimizer.state_dict(),
-
-        "scheduler_state_dict": (
-            scheduler.state_dict()
-            if scheduler is not None
-            else None
-        ),
-
-        "torch_rng_state": torch.get_rng_state(),
-    }
-
-    ###############################################################
-    # Latest checkpoint
-    ###############################################################
-
-    torch.save(
-        checkpoint,
-        LATEST_CHECKPOINT,
-    )
-
-    ###############################################################
-    # Best checkpoint
-    ###############################################################
-
-    if best:
-
-        torch.save(
-            checkpoint,
-            BEST_CHECKPOINT,
-        )
-
-    print()
-
-    print(
-        f"Checkpoint saved : {LATEST_CHECKPOINT.name}"
-    )
-
-    if best:
-
-        print(
-            f"Best model saved : {BEST_CHECKPOINT.name}"
-        )
-
-
-###############################################################################
-# Resume Training
-###############################################################################
-
-def load_checkpoint(
-    model: DSTNet,
-    optimizer,
-    scheduler,
-):
-    """
-    Resume training if a checkpoint exists.
-
-    Returns
-    -------
-    start_epoch
-    best_metric
-    """
-
-    if not LATEST_CHECKPOINT.exists():
-
-        print_section(
-            "Checkpoint"
-        )
-
-        print("No checkpoint found.")
-
-        return 0, float("inf")
-
-    print_section(
-        "Resuming Training"
-    )
-
-    checkpoint = torch.load(
-
-        LATEST_CHECKPOINT,
-
-        map_location=DEVICE,
-
-    )
-
-    if "torch_rng_state" in checkpoint:
-
-        torch.set_rng_state(
-            checkpoint["torch_rng_state"]
-        )
-
-    model.load_state_dict(
-
-        checkpoint["model_state_dict"]
-
-    )
-
-    optimizer.load_state_dict(
-
-        checkpoint["optimizer_state_dict"]
-
-    )
-
-    scheduler_state = checkpoint.get(
-        "scheduler_state_dict",
-        None,
-    )
-
-    if scheduler is not None and scheduler_state is not None:
-
-        scheduler.load_state_dict(
-            scheduler_state
-        )
-
-    epoch = checkpoint["epoch"]
-
-    best_metric = checkpoint.get(
-        "best_metric",
-        checkpoint["val_metrics"].get(
-            "minADE",
-            float("inf"),
-        ),
-    )
-
-    print(
-        f"Resumed from epoch {epoch}"
-    )
-
-    return epoch, best_metric
-
-
-###############################################################################
-# CSV Logger
-###############################################################################
-
-CSV_HEADER = [
-
-    "epoch",
-
-    "train_loss",
-
-    "minADE",
-
-    "minFDE",
-
-    "MissRate",
-
-    "learning_rate",
-
-    "epoch_time",
-
-]
-
-
-def initialize_csv():
-
-    if CSV_LOG.exists():
-
-        return
-
-    with open(
-
-        CSV_LOG,
-
-        "w",
-
-        newline="",
-
-    ) as file:
-
-        writer = csv.writer(file)
-
-        writer.writerow(
-            CSV_HEADER
-        )
-
-
-def append_csv(
-
-    epoch: int,
-
-    train_loss: float,
-
-    metrics: dict[str, float],
-
-    learning_rate: float,
-
-    epoch_time: float,
-
-):
-
-    with open(
-
-        CSV_LOG,
-
-        "a",
-
-        newline="",
-
-    ) as file:
-
-        writer = csv.writer(file)
-
-        writer.writerow(
-
-            [
-
-                epoch,
-
-                train_loss,
-
-                metrics.get(
-                    "minADE",
-                    0.0,
-                ),
-
-                metrics.get(
-                    "minFDE",
-                    0.0,
-                ),
-
-                metrics.get(
-                    "MissRate",
-                    0.0,
-                ),
-
-                learning_rate,
-
-                epoch_time,
-
-            ]
-
-        )
-
-
-###############################################################################
-# Learning Rate
-###############################################################################
-
-def get_learning_rate(
-    optimizer,
-) -> float:
-
-    return optimizer.param_groups[0]["lr"]
-
-
-###############################################################################
-# Epoch Summary
-###############################################################################
-
-def print_epoch_summary(
-
-    epoch: int,
-
-    train_loss: float,
-
-    metrics: dict[str, float],
-
-    learning_rate: float,
-
-    epoch_time: float,
-
-):
-
-    print()
-
-    print("=" * 80)
-
-    print(
-        f"Epoch {epoch} Summary"
-    )
-
-    print("=" * 80)
-
-    print(
-        f"Train Loss : {train_loss:.6f}"
-    )
-
-    print(
-        f"minADE     : {metrics.get('minADE',0.0):.6f}"
-    )
-
-    print(
-        f"minFDE     : {metrics.get('minFDE',0.0):.6f}"
-    )
-
-    print(
-        f"MissRate   : {metrics.get('MissRate',0.0):.6f}"
-    )
-
-    print(
-        f"Learning Rate : {learning_rate:.8f}"
-    )
-
-    print(
-        f"Epoch Time : {epoch_time:.2f} s"
-    )
-
-###############################################################################
-# Training Loop
-###############################################################################
-
-def train_one_epoch(
-    *,
-    epoch: int,
-    model: DSTNet,
-    dataloader,
-    optimizer,
-    scheduler,
-    criterion,
-):
-    """
-    Train DSTNet for one epoch.
-
-    Returns
-    -------
-    average_loss
-    """
-
-    model.train()
-
-    running_loss = 0.0
-
-    num_batches = len(dataloader)
-
-    epoch_start = time.perf_counter()
-
-    ###########################################################################
-    # Iterate over batches
-    ###########################################################################
-
-    for batch_index, batch in enumerate(
-
-        dataloader,
-
-        start=1,
-
-    ):
-
-        batch_start = time.perf_counter()
-
-        ###############################################################
-        # Move batch
-        ###############################################################
-
-        batch = move_to_device(
-            batch,
-            DEVICE,
-        )
-
-        ###############################################################
-        # Zero gradients
-        ###############################################################
-
-        optimizer.zero_grad(
-            set_to_none=True,
-        )
-
-        ###############################################################
-        # Forward
-        ###############################################################
-
-        coarse_prediction, refined_prediction = model(
-
-            agent_trajectories=batch[
-                "agent_trajectories"
-            ],
-
-            lane_centerlines=batch[
-                "lane_centerlines"
-            ],
-
-            positions=batch[
-                "positions"
-            ],
-
-            headings=batch[
-                "headings"
-            ],
-
-            graph=batch[
-                "graph"
-            ],
-
-            agent_mask=batch.get(
-                "agent_mask",
+    proposal_weight = float(
+        _optional_attribute(
+            CFG,
+            (
+                "training.proposal_weight",
+                "loss.proposal_weight",
             ),
-
-            lane_mask=batch.get(
-                "lane_mask",
-            ),
+            1.0,
         )
-
-        ###############################################################
-        # Loss
-        ###############################################################
-
-        losses = criterion(
-
-            prediction=coarse_prediction,
-
-            refined_prediction=refined_prediction,
-
-            ground_truth=batch[
-                "future_trajectories"
-            ],
-        )
-
-        loss = losses["loss"]
-
-        ###############################################################
-        # Backward
-        ###############################################################
-
-        loss.backward()
-
-        ###############################################################
-        # Gradient clipping
-        ###############################################################
-
-        gradient_norm = torch.nn.utils.clip_grad_norm_(
-
-            model.parameters(),
-
-            max_norm=GRADIENT_CLIP,
-
-        )
-
-        ###########################################################################
-        # Gradient Monitoring
-        ###########################################################################
-
-        if torch.isnan(gradient_norm):
-
-            raise RuntimeError(
-
-                "Gradient norm became NaN."
-
-            )
-
-        if gradient_norm > 100:
-
-            print(
-
-                f"\n[Warning] Large gradient norm: "
-
-                f"{gradient_norm:.2f}"
-
-            )
-
-        ###############################################################
-        # Optimizer
-        ###############################################################
-
-        optimizer.step()
-
-        ###############################################################
-        # Scheduler
-        ###############################################################
-
-        if scheduler is not None:
-
-            scheduler.step()
-
-        ###############################################################
-        # Statistics
-        ###############################################################
-
-        running_loss += loss.item()
-
-        ###############################################################
-        # Progress
-        ###############################################################
-
-        if (
-
-            batch_index == 1
-
-            or
-
-            batch_index % 50 == 0
-
-            or
-
-            batch_index == num_batches
-
-        ):
-
-            elapsed = (
-
-                time.perf_counter()
-
-                - batch_start
-
-            )
-
-            print(
-
-                f"[Epoch {epoch:03d}] "
-
-                f"Batch {batch_index:05d}/{num_batches:05d} | "
-
-                f"Loss {loss.item():8.4f} | "
-
-                f"Proposal {losses['proposal_loss']:.4f} | "
-
-                f"Cls {losses['classification_loss']:.4f} | "
-
-                f"Score {losses['score_loss']:.4f} | "
-
-                f"Ref {losses['refinement_loss']:.4f} | "
-
-                f"Grad {float(gradient_norm):7.4f} | "
-
-                f"LR {get_learning_rate(optimizer):.6f} | "
-
-                f"{elapsed:.1f}s"
-
-            )
-
-    ###########################################################################
-    # Epoch statistics
-    ###########################################################################
-
-    average_loss = (
-
-        running_loss
-
-        / max(
-
-            1,
-
-            num_batches,
-
-        )
-
     )
 
-    return average_loss
+    classification_weight = float(
+        _optional_attribute(
+            CFG,
+            (
+                "training.classification_weight",
+                "loss.classification_weight",
+            ),
+            1.0,
+        )
+    )
+
+    score_weight = float(
+        _optional_attribute(
+            CFG,
+            (
+                "training.score_weight",
+                "loss.score_weight",
+            ),
+            0.1,
+        )
+    )
+
+    refinement_weight = float(
+        _optional_attribute(
+            CFG,
+            (
+                "training.refinement_weight",
+                "loss.refinement_weight",
+            ),
+            1.0,
+        )
+    )
+
+    return TotalLoss(
+        proposal_weight=proposal_weight,
+        classification_weight=classification_weight,
+        score_weight=score_weight,
+        refinement_weight=refinement_weight,
+    )
+
 
 ###############################################################################
-# Validation Loop
+# Optimizer
 ###############################################################################
 
-def validate_one_epoch(
-    *,
+
+def build_training_optimizer(
     model: DSTNet,
-    dataloader,
-):
+) -> torch.optim.Optimizer:
     """
-    Evaluate the model on the validation dataset.
-
-    Returns
-    -------
-    dict[str, float]
-        {
-            "minADE": ...,
-            "minFDE": ...,
-            "MissRate": ...
-        }
+    Build optimizer from training configuration.
     """
 
-    print()
+    optimizer_name = str(
+        _optional_attribute(
+            CFG,
+            (
+                "training.optimizer",
+            ),
+            "adamw",
+        )
+    )
 
-    print("=" * 80)
+    learning_rate = float(
+        _optional_attribute(
+            CFG,
+            (
+                "training.learning_rate",
+                "training.lr",
+            ),
+            1e-4,
+        )
+    )
 
-    print("Validation")
+    weight_decay = float(
+        _optional_attribute(
+            CFG,
+            (
+                "training.weight_decay",
+            ),
+            1e-2,
+        )
+    )
 
-    print("=" * 80)
-
-    ###########################################################################
-    # Build evaluator
-    ###########################################################################
-
-    evaluator = Evaluator(
-
+    return build_optimizer(
         model=model,
-
-        dataloader=dataloader,
-
-        device=DEVICE,
-
+        optimizer=optimizer_name,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
     )
 
-    ###########################################################################
-    # Run evaluation
-    ###########################################################################
 
-    start_time = time.perf_counter()
+###############################################################################
+# Scheduler
+###############################################################################
 
-    metrics = evaluator.evaluate()
 
-    validation_time = (
+def build_training_scheduler(
+    optimizer: torch.optim.Optimizer,
+    *,
+    total_steps: int,
+) -> Any:
+    """
+    Build scheduler from training configuration.
 
-        time.perf_counter()
+    The scheduler factory receives the total number of optimizer updates
+    for the complete training run.
+    """
 
-        - start_time
-
+    scheduler_name = str(
+        _optional_attribute(
+            CFG,
+            (
+                "training.scheduler",
+            ),
+            "cosine",
+        )
     )
 
-    ###########################################################################
-    # Print metrics
-    ###########################################################################
+    return build_scheduler(
+        optimizer,
+        scheduler=scheduler_name,
+        total_steps=total_steps,
+    )
+
+
+###############################################################################
+# Checkpoint Directory
+###############################################################################
+
+
+def checkpoint_directory() -> Path:
+    """
+    Resolve configured checkpoint directory.
+    """
+
+    configured = _optional_attribute(
+        CFG,
+        (
+            "runtime.checkpoint_dir",
+        ),
+        "checkpoints",
+    )
+
+    return resolve_path(
+        configured
+    )
+
+
+###############################################################################
+# Main
+###############################################################################
+
+
+def main() -> None:
+    """
+    Main production training entry point.
+    """
 
     print()
+    print("=" * 80)
+    print("DSTNet PRODUCTION TRAINING")
+    print("=" * 80)
 
-    print("-" * 80)
+    ###########################################################################
+    # Runtime Configuration
+    ###########################################################################
 
-    print("Validation Metrics")
+    requested_device = str(
+        _optional_attribute(
+            CFG,
+            (
+                "runtime.device",
+            ),
+            "auto",
+        )
+    )
 
-    print("-" * 80)
+    device = resolve_device(
+        requested_device
+    )
 
-    if len(metrics) == 0:
+    num_workers = int(
+        _optional_attribute(
+            CFG,
+            (
+                "runtime.num_workers",
+            ),
+            0,
+        )
+    )
 
-        print("No metrics returned.")
+    pin_memory = bool(
+        _optional_attribute(
+            CFG,
+            (
+                "runtime.pin_memory",
+            ),
+            device.type == "cuda",
+        )
+    )
 
-        return {}
+    seed = int(
+        _optional_attribute(
+            CFG,
+            (
+                "runtime.seed",
+            ),
+            42,
+        )
+    )
 
-    for key in sorted(metrics.keys()):
+    deterministic = bool(
+        _optional_attribute(
+            CFG,
+            (
+                "runtime.deterministic",
+            ),
+            True,
+        )
+    )
 
-        print(
+    set_random_seed(
+        seed=seed,
+        deterministic=deterministic,
+    )
 
-            f"{key:<15}"
+    ###########################################################################
+    # Training Configuration
+    ###########################################################################
 
-            f"{metrics[key]:.6f}"
+    batch_size = int(
+        _optional_attribute(
+            CFG,
+            (
+                "training.batch_size",
+            ),
+            2,
+        )
+    )
 
+    epochs = int(
+        _optional_attribute(
+            CFG,
+            (
+                "training.epochs",
+            ),
+            30,
+        )
+    )
+
+    gradient_clip = _optional_attribute(
+        CFG,
+        (
+            "training.gradient_clip",
+            "training.gradient_clip_norm",
+        ),
+        1.0,
+    )
+
+    if gradient_clip is not None:
+
+        gradient_clip = float(
+            gradient_clip
         )
 
+    ###########################################################################
+    # Print Configuration Summary
+    ###########################################################################
+
     print()
+    print("Runtime")
+    print("-" * 80)
 
     print(
+        f"Device       : {device}"
+    )
 
-        f"Validation Time : "
+    print(
+        f"Seed         : {seed}"
+    )
 
-        f"{validation_time:.2f} s"
+    print(
+        f"Num workers  : {num_workers}"
+    )
 
+    print(
+        f"Pin memory   : {pin_memory}"
+    )
+
+    print()
+    print("Training")
+    print("-" * 80)
+
+    print(
+        f"Batch size   : {batch_size}"
+    )
+
+    print(
+        f"Epochs       : {epochs}"
+    )
+
+    print(
+        f"Grad clip    : {gradient_clip}"
     )
 
     ###########################################################################
-    # Sanity Checks
+    # Dataset Paths
     ###########################################################################
 
-    required_metrics = (
-
-        "minADE",
-
-        "minFDE",
-
-        "MissRate",
-
+    train_root = resolve_path(
+        _require_attribute(
+            CFG,
+            "dataset.train_dir",
+        )
     )
 
-    for metric_name in required_metrics:
-
-        if metric_name not in metrics:
-
-            raise RuntimeError(
-
-                f"Missing validation metric "
-
-                f"'{metric_name}'."
-
-            )
-
-        value = metrics[metric_name]
-
-        if not torch.isfinite(
-
-            torch.tensor(value)
-
-        ):
-
-            raise RuntimeError(
-
-                f"Metric '{metric_name}' "
-
-                f"is NaN or Inf."
-
-            )
-
-    ###########################################################################
-    # Return
-    ###########################################################################
-
-    return metrics
-
-###############################################################################
-# Reusable Training Pipeline
-###############################################################################
-
-def run_training(
-    *,
-    train_dataset,
-    val_dataset,
-    epochs: int = EPOCHS,
-    checkpoint_root: Path | None = None,
-    log_root: Path | None = None,
-):
-    """
-    Reusable training pipeline.
-
-    This contains the complete training logic previously implemented
-    inside main().
-
-    Parameters
-    ----------
-    train_dataset
-        Training dataset.
-
-    val_dataset
-        Validation dataset.
-
-    epochs
-        Number of training epochs.
-
-    checkpoint_root
-        Optional checkpoint directory override.
-
-    log_root
-        Optional log directory override.
-    """
-
-    global CHECKPOINT_ROOT
-    global LOG_ROOT
-    global LATEST_CHECKPOINT
-    global BEST_CHECKPOINT
-    global CSV_LOG
-    global EPOCHS
-
-    ###########################################################################
-    # Override runtime configuration
-    ###########################################################################
-
-    if checkpoint_root is not None:
-
-        CHECKPOINT_ROOT = checkpoint_root
-
-        LATEST_CHECKPOINT = (
-
-            CHECKPOINT_ROOT
-
-            / "latest.pth"
-
+    val_root = resolve_path(
+        _require_attribute(
+            CFG,
+            "dataset.val_dir",
         )
-
-        BEST_CHECKPOINT = (
-
-            CHECKPOINT_ROOT
-
-            / "best.pth"
-
-        )
-
-    if log_root is not None:
-
-        LOG_ROOT = log_root
-
-        CSV_LOG = (
-
-            LOG_ROOT
-
-            / "training_log.csv"
-
-        )
-
-    EPOCHS = epochs
-
-    ###########################################################################
-    # Directories
-    ###########################################################################
-
-    create_directories()
-
-    initialize_csv()
-
-    ###########################################################################
-    # DataLoaders
-    ###########################################################################
-
-    print_section(
-        "Building DataLoaders"
     )
+
+    if not train_root.exists():
+
+        raise FileNotFoundError(
+            f"Training directory does not exist: "
+            f"{train_root}"
+        )
+
+    if not val_root.exists():
+
+        raise FileNotFoundError(
+            f"Validation directory does not exist: "
+            f"{val_root}"
+        )
+
+    ###########################################################################
+    # Dataset Construction
+    ###########################################################################
+
+    print()
+    print("=" * 80)
+    print("BUILDING DATASETS")
+    print("=" * 80)
+
+    train_dataset = build_dataset(
+        train_root,
+        train=True,
+    )
+
+    val_dataset = build_dataset(
+        val_root,
+        train=False,
+    )
+
+    print(
+        f"Training scenes   : {len(train_dataset):,}"
+    )
+
+    print(
+        f"Validation scenes : {len(val_dataset):,}"
+    )
+
+    ###########################################################################
+    # DataLoader Construction
+    ###########################################################################
+
+    print()
+    print("=" * 80)
+    print("BUILDING DATALOADERS")
+    print("=" * 80)
 
     train_loader = build_dataloader(
-
         train_dataset,
-
         train=True,
-
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
     )
 
     val_loader = build_dataloader(
-
         val_dataset,
-
         train=False,
-
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
     )
 
     print(
-        f"Training Batches   : {len(train_loader):,}"
+        f"Training batches   : {len(train_loader):,}"
     )
 
     print(
-        f"Validation Batches : {len(val_loader):,}"
+        f"Validation batches : {len(val_loader):,}"
     )
 
     ###########################################################################
     # Model
     ###########################################################################
 
+    print()
+    print("=" * 80)
+    print("BUILDING MODEL")
+    print("=" * 80)
+
     model = build_model()
 
-    ###########################################################################
-    # Optimizer / Scheduler / Loss
-    ###########################################################################
+    model.to(
+        device
+    )
 
-    optimizer, scheduler, criterion = (
-
-        build_training_components(
-
-            model,
-
-            total_steps=len(train_loader),
-
+    total_parameters, trainable_parameters = (
+        count_parameters(
+            model
         )
+    )
 
+    print(
+        f"Device               : {device}"
+    )
+
+    print(
+        f"Total parameters     : "
+        f"{total_parameters:,}"
+    )
+
+    print(
+        f"Trainable parameters : "
+        f"{trainable_parameters:,}"
     )
 
     ###########################################################################
-    # Resume
+    # Loss
     ###########################################################################
 
-    start_epoch, best_metric = load_checkpoint(
+    criterion = build_criterion()
 
-        model,
+    print()
+    print(
+        f"Loss : {criterion}"
+    )
 
+    ###########################################################################
+    # Optimizer
+    ###########################################################################
+
+    optimizer = build_training_optimizer(
+        model
+    )
+
+    print()
+    print(
+        f"Optimizer : "
+        f"{optimizer.__class__.__name__}"
+    )
+
+    print(
+        f"Learning rate : "
+        f"{optimizer.param_groups[0]['lr']:.8f}"
+    )
+
+    print(
+        f"Weight decay  : "
+        f"{optimizer.param_groups[0]['weight_decay']:.8f}"
+    )
+
+    ###########################################################################
+    # Scheduler
+    ###########################################################################
+
+    total_training_steps = (
+        len(train_loader)
+        * epochs
+    )
+
+    scheduler = build_training_scheduler(
         optimizer,
+        total_steps=total_training_steps,
+    )
 
-        scheduler,
+    print(
+        f"Scheduler : "
+        f"{scheduler.__class__.__name__}"
+    )
 
+    print(
+        f"Total optimizer steps : "
+        f"{total_training_steps:,}"
     )
 
     ###########################################################################
-    # Early Stopping
+    # Checkpoint Directory
     ###########################################################################
 
-    epochs_without_improvement = 0
+    checkpoint_dir = checkpoint_directory()
+
+    checkpoint_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    print()
+    print(
+        f"Checkpoint directory : "
+        f"{checkpoint_dir}"
+    )
+
+    ###########################################################################
+    # Trainer
+    ###########################################################################
+
+    print()
+    print("=" * 80)
+    print("BUILDING TRAINER")
+    print("=" * 80)
+
+    trainer = Trainer(
+        model=model,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=device,
+        checkpoint_dir=str(
+            checkpoint_dir
+        ),
+        gradient_clip=gradient_clip,
+    )
+
+    print(
+        "Trainer initialized successfully."
+    )
 
     ###########################################################################
     # Training
     ###########################################################################
 
     print()
-
+    print("=" * 80)
+    print("STARTING TRAINING")
     print("=" * 80)
 
-    print("Starting Training")
-
-    print("=" * 80)
-
-    training_start = time.perf_counter()
-
-    try:
-
-        for epoch in range(
-
-            start_epoch + 1,
-
-            epochs + 1,
-
-        ):
-
-            print()
-
-            print("=" * 80)
-
-            print(
-                f"Epoch {epoch}/{epochs}"
-            )
-
-            print("=" * 80)
-
-            epoch_start = time.perf_counter()
-
-            train_loss = train_one_epoch(
-
-                epoch=epoch,
-
-                model=model,
-
-                dataloader=train_loader,
-
-                optimizer=optimizer,
-
-                scheduler=scheduler,
-
-                criterion=criterion,
-
-            )
-
-            val_metrics = validate_one_epoch(
-
-                model=model,
-
-                dataloader=val_loader,
-
-            )
-
-            epoch_time = (
-
-                time.perf_counter()
-
-                - epoch_start
-
-            )
-
-            learning_rate = get_learning_rate(
-
-                optimizer,
-
-            )
-
-            append_csv(
-
-                epoch=epoch,
-
-                train_loss=train_loss,
-
-                metrics=val_metrics,
-
-                learning_rate=learning_rate,
-
-                epoch_time=epoch_time,
-
-            )
-
-            current_metric = val_metrics.get(
-
-                "minADE",
-
-                float("inf"),
-
-            )
-
-            is_best = (
-
-                current_metric
-
-                <
-
-                best_metric
-
-            )
-
-            if is_best:
-
-                best_metric = current_metric
-
-                epochs_without_improvement = 0
-
-                print()
-
-                print(
-
-                    f"✓ New Best Model "
-
-                    f"(minADE={best_metric:.6f})"
-
-                )
-
-            else:
-
-                epochs_without_improvement += 1
-
-                print(
-
-                    f"No improvement "
-
-                    f"({epochs_without_improvement}/{PATIENCE})"
-
-                )
-
-            if epoch % SAVE_EVERY == 0:
-
-                save_checkpoint(
-
-                    epoch=epoch,
-
-                    model=model,
-
-                    optimizer=optimizer,
-
-                    scheduler=scheduler,
-
-                    train_loss=train_loss,
-
-                    val_metrics=val_metrics,
-
-                    best=is_best,
-
-                )
-
-            print_epoch_summary(
-
-                epoch=epoch,
-
-                train_loss=train_loss,
-
-                metrics=val_metrics,
-
-                learning_rate=learning_rate,
-
-                epoch_time=epoch_time,
-
-            )
-
-            ###########################################################################
-            # Early Stopping
-            ###########################################################################
-
-            if (
-
-                EARLY_STOPPING
-
-                and
-
-                epochs_without_improvement >= PATIENCE
-
-            ):
-
-                print()
-
-                print("=" * 80)
-
-                print(
-
-                    "Early stopping triggered."
-
-                )
-
-                print(
-
-                    f"No improvement for "
-
-                    f"{PATIENCE} epochs."
-
-                )
-
-                print("=" * 80)
-
-                break
-
-    except KeyboardInterrupt:
-
-        print()
-
-        print("=" * 80)
-
-        print("Training Interrupted")
-
-        print("=" * 80)
-
-        save_checkpoint(
-
-            epoch=epoch,
-
-            model=model,
-
-            optimizer=optimizer,
-
-            scheduler=scheduler,
-
-            train_loss=train_loss,
-
-            val_metrics=val_metrics,
-
-            best=False,
-
-        )
-
-    total_training_time = (
-
-        time.perf_counter()
-
-        - training_start
-
+    trainer.fit(
+        epochs=epochs
     )
+
+    ###########################################################################
+    # Completion
+    ###########################################################################
 
     print()
-
     print("=" * 80)
-
-    print("Training Complete")
-
+    print("DSTNet TRAINING COMPLETE")
     print("=" * 80)
 
     print(
-
-        f"Best minADE : "
-
-        f"{best_metric:.6f}"
-
-    )
-
-    print(
-
-        f"Total Time  : "
-
-        f"{total_training_time / 3600:.2f} hours"
-
-    )
-
-    print()
-
-    print(
-
-        f"Checkpoints : "
-
-        f"{CHECKPOINT_ROOT}"
-
-    )
-
-    print(
-
-        f"Logs        : "
-
-        f"{CSV_LOG}"
-
-    )
-
-###############################################################################
-# Main
-###############################################################################
-
-def main() -> None:
-
-    print_header(
-        "DSTNet Production Training"
-    )
-
-    ###########################################################################
-    # Directories
-    ###########################################################################
-
-    create_directories()
-
-    initialize_csv()
-
-    ###########################################################################
-    # Datasets
-    ###########################################################################
-
-    print_section(
-        "Building Datasets"
-    )
-
-    train_dataset = build_dataset(
-
-        TRAIN_ROOT,
-
-        train=True,
-
-    )
-
-    val_dataset = build_dataset(
-
-        VAL_ROOT,
-
-        train=False,
-
-    )
-
-    print(
-        f"Training Scenes   : {len(train_dataset):,}"
-    )
-
-    print(
-        f"Validation Scenes : {len(val_dataset):,}"
-    )
-
-    ###########################################################################
-    # DataLoaders
-    ###########################################################################
-
-    print_section(
-        "Building DataLoaders"
-    )
-
-    train_loader = build_dataloader(
-
-        train_dataset,
-
-        train=True,
-
-    )
-
-    val_loader = build_dataloader(
-
-        val_dataset,
-
-        train=False,
-
-    )
-
-    print(
-        f"Training Batches   : {len(train_loader):,}"
-    )
-
-    print(
-        f"Validation Batches : {len(val_loader):,}"
-    )
-
-    ###########################################################################
-    # Model
-    ###########################################################################
-
-    model = build_model()
-
-    ###########################################################################
-    # Optimizer / Scheduler / Loss
-    ###########################################################################
-
-    optimizer, scheduler, criterion = (
-
-        build_training_components(
-
-            model,
-
-            total_steps=len(train_loader),
-
-        )
-
-    )
-
-    ###########################################################################
-    # Resume
-    ###########################################################################
-
-    start_epoch, best_metric = load_checkpoint(
-
-        model,
-
-        optimizer,
-
-        scheduler,
-
-    )
-
-    ###########################################################################
-    # Run Training
-    ###########################################################################
-
-    run_training(
-
-        train_dataset=train_dataset,
-
-        val_dataset=val_dataset,
-
-        epochs=EPOCHS,
-
+        f"Checkpoint directory : "
+        f"{checkpoint_dir}"
     )
 
 
@@ -1754,8 +1237,7 @@ def main() -> None:
 # Entry Point
 ###############################################################################
 
+
 if __name__ == "__main__":
 
     main()
-
-

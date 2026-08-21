@@ -11,12 +11,12 @@ Output Batch
 {
     "agent_trajectories": (B,N,Tobs,2)
     "future_trajectories": (B,N,Tpred,2)
-    "lane_centerlines": (B,L,P,2)
+    "map_centerlines": (B,L,P,2)
     "positions": (B,N,2)
     "headings": (B,N)
-    "graph": list[GraphData]
+    "graph": list[SceneGraph]
     "agent_mask": (B,N)
-    "lane_mask": (B,L)
+    "map_mask": (B,L)
     "metadata": dict
 }
 """
@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from datasets.graph_builder import GraphData
+from datasets.scene_graph_builder import SceneGraph
 from datasets.scene_data import SceneData
 
 ###############################################################################
@@ -39,7 +39,7 @@ OBSERVATION_STEPS = 20
 
 PREDICTION_STEPS = 30
 
-LANE_POINTS = 20
+MAP_POINTS = 20
 
 ###############################################################################
 # Tensor Helpers
@@ -166,7 +166,7 @@ def _allocate_agent_arrays(
     }
 
 
-def _allocate_lane_arrays(
+def _allocate_map_arrays(
     batch_size: int,
     max_lanes: int,
 ) -> dict[str, np.ndarray]:
@@ -176,17 +176,17 @@ def _allocate_lane_arrays(
 
     return {
 
-        "lane_centerlines": np.zeros(
+        "map_centerlines": np.zeros(
             (
                 batch_size,
                 max_lanes,
-                LANE_POINTS,
+                MAP_POINTS,
                 2,
             ),
             dtype=np.float32,
         ),
 
-        "lane_mask": np.zeros(
+        "map_mask": np.zeros(
             (
                 batch_size,
                 max_lanes,
@@ -349,7 +349,7 @@ def _collate_agents(
             # Last observed heading.
             ###################################################################
 
-            headings = agent["heading"]
+            headings = agent["headings"]
 
             if len(headings):
 
@@ -403,7 +403,7 @@ def _collate_agents(
 ###############################################################################
 
 
-def _collate_lanes(
+def _collate_maps(
     batch: list[SceneData],
 ) -> dict[str, torch.Tensor]:
     """
@@ -412,19 +412,19 @@ def _collate_lanes(
     Returns
     -------
     {
-        "lane_centerlines": (B,L,P,2)
-        "lane_mask": (B,L)
+        "map_centerlines": (B,L,P,2)
+        "map_mask": (B,L)
     }
     """
 
     batch_size = len(batch)
 
     max_lanes = max(
-        scene.num_lanes
+        scene.num_maps
         for scene in batch
     )
 
-    arrays = _allocate_lane_arrays(
+    arrays = _allocate_map_arrays(
         batch_size=batch_size,
         max_lanes=max_lanes,
     )
@@ -435,19 +435,19 @@ def _collate_lanes(
 
     for batch_index, scene in enumerate(batch):
 
-        for lane_index, lane in enumerate(scene.lanes):
+        for lane_index, lane in enumerate(scene.maps):
 
             centerline = _pad_sequence(
                 lane["centerline"],
-                LANE_POINTS,
+                MAP_POINTS,
             )
 
-            arrays["lane_centerlines"][
+            arrays["map_centerlines"][
                 batch_index,
                 lane_index,
             ] = centerline
 
-            arrays["lane_mask"][
+            arrays["map_mask"][
                 batch_index,
                 lane_index,
             ] = True
@@ -458,12 +458,12 @@ def _collate_lanes(
 
     return {
 
-        "lane_centerlines": _to_tensor(
-            arrays["lane_centerlines"],
+        "map_centerlines": _to_tensor(
+            arrays["map_centerlines"],
         ),
 
-        "lane_mask": torch.as_tensor(
-            arrays["lane_mask"],
+        "map_mask": torch.as_tensor(
+            arrays["map_mask"],
             dtype=torch.bool,
         ),
 
@@ -477,17 +477,17 @@ def _collate_lanes(
 
 def _collate_graphs(
     batch: list[SceneData],
-) -> list[GraphData]:
+) -> list[SceneGraph]:
     """
     Collect graph objects.
 
-    GraphData instances contain variable-sized graph
+    SceneGraph instances contain variable-sized graph
     connectivity information, so they are kept as a list.
     """
 
     return [
 
-        scene.graph
+        scene.scene_graph
 
         for scene in batch
 
@@ -547,17 +547,17 @@ def collate_fn(
 
         "future_trajectories": (B,N,Tpred,2)
 
-        "lane_centerlines": (B,L,P,2)
+        "map_centerlines": (B,L,P,2)
 
         "positions": (B,N,2)
 
         "headings": (B,N)
 
-        "graph": list[GraphData]
+        "graph": list[SceneGraph]
 
         "agent_mask": (B,N)
 
-        "lane_mask": (B,L)
+        "map_mask": (B,L)
 
         "metadata": dict
     }
@@ -583,7 +583,7 @@ def collate_fn(
         batch,
     )
 
-    lanes = _collate_lanes(
+    maps = _collate_maps(
         batch,
     )
 
@@ -607,8 +607,8 @@ def collate_fn(
         "future_trajectories":
             agents["future_trajectories"],
 
-        "lane_centerlines":
-            lanes["lane_centerlines"],
+        "map_centerlines":
+            maps["map_centerlines"],
 
         "positions":
             agents["positions"],
@@ -622,8 +622,8 @@ def collate_fn(
         "agent_mask":
             agents["agent_mask"],
 
-        "lane_mask":
-            lanes["lane_mask"],
+        "map_mask":
+            maps["map_mask"],
 
         #######################################################################
         # Metadata

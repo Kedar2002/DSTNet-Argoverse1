@@ -16,8 +16,6 @@ Features
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 import torch
 from torch import nn
 

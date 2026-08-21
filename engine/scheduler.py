@@ -10,6 +10,10 @@ Supported schedulers
 - MultiStepLR
 - CosineAnnealingLR
 - Warmup + Cosine
+
+The scheduler is stepped once per optimizer update by TrainStep.
+Therefore ``total_steps`` should normally represent the total number
+of optimizer updates, not the number of epochs.
 """
 
 from __future__ import annotations
@@ -18,14 +22,16 @@ import math
 
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import (
-    LambdaLR,
-    StepLR,
-    MultiStepLR,
     CosineAnnealingLR,
+    LambdaLR,
+    LRScheduler,
+    MultiStepLR,
+    StepLR,
 )
 
+
 ###############################################################################
-# Warmup + Cosine
+# Warmup + cosine
 ###############################################################################
 
 
@@ -34,14 +40,52 @@ def warmup_cosine_lambda(
     *,
     warmup_steps: int,
     total_steps: int,
-):
+) -> float:
     """
     Linear warmup followed by cosine decay.
     """
 
-    ###############################################################
+    if warmup_steps < 0:
+        raise ValueError(
+            "warmup_steps must be non-negative."
+        )
+
+    if total_steps <= 0:
+        raise ValueError(
+            "total_steps must be positive."
+        )
+
+    if warmup_steps > total_steps:
+        raise ValueError(
+            "warmup_steps cannot exceed total_steps."
+        )
+
+    ###########################################################################
+    # No warmup
+    ###########################################################################
+
+    if warmup_steps == 0:
+
+        progress = (
+            float(current_step)
+            / float(max(1, total_steps))
+        )
+
+        progress = min(
+            max(progress, 0.0),
+            1.0,
+        )
+
+        return 0.5 * (
+            1.0
+            + math.cos(
+                math.pi * progress
+            )
+        )
+
+    ###########################################################################
     # Warmup
-    ###############################################################
+    ###########################################################################
 
     if current_step < warmup_steps:
 
@@ -49,21 +93,17 @@ def warmup_cosine_lambda(
             max(1, warmup_steps)
         )
 
-    ###############################################################
-    # Cosine
-    ###############################################################
+    ###########################################################################
+    # Cosine decay
+    ###########################################################################
 
     progress = (
-
         current_step - warmup_steps
-
     ) / float(
-
         max(
             1,
             total_steps - warmup_steps,
         )
-
     )
 
     progress = min(
@@ -72,16 +112,15 @@ def warmup_cosine_lambda(
     )
 
     return 0.5 * (
-
         1.0
         + math.cos(
             math.pi * progress
         )
-
     )
 
+
 ###############################################################################
-# Scheduler Factory
+# Scheduler factory
 ###############################################################################
 
 
@@ -94,95 +133,165 @@ def build_scheduler(
     step_size: int = 10,
     gamma: float = 0.1,
     milestones: list[int] | None = None,
-):
+) -> LRScheduler:
     """
-    Build scheduler.
+    Build a learning-rate scheduler.
+
+    Parameters
+    ----------
+    optimizer:
+        Optimizer whose learning rate is scheduled.
+
+    scheduler:
+        One of:
+
+            constant
+            step
+            multistep
+            cosine
+            warmup_cosine
+
+    total_steps:
+        Total optimizer-update count used by cosine schedules.
+
+    warmup_steps:
+        Number of optimizer updates used for linear warmup.
+
+    step_size:
+        StepLR decay interval.
+
+    gamma:
+        Multiplicative decay factor.
+
+    milestones:
+        MultiStepLR milestones.
     """
 
-    scheduler = scheduler.lower()
+    if not isinstance(
+        scheduler,
+        str,
+    ):
+        raise TypeError(
+            "scheduler must be a string."
+        )
 
-    ###################################################################
-    # Constant LR
-    ###################################################################
+    if total_steps <= 0:
+        raise ValueError(
+            "total_steps must be positive."
+        )
 
-    if scheduler == "constant":
+    scheduler_name = (
+        scheduler.strip().lower()
+    )
+
+    ###########################################################################
+    # Constant
+    ###########################################################################
+
+    if scheduler_name == "constant":
 
         return LambdaLR(
             optimizer,
-            lambda _: 1.0,
+            lr_lambda=lambda _: 1.0,
         )
 
-    ###################################################################
+    ###########################################################################
     # StepLR
-    ###################################################################
+    ###########################################################################
 
-    if scheduler == "step":
+    if scheduler_name == "step":
+
+        if step_size <= 0:
+            raise ValueError(
+                "step_size must be positive."
+            )
+
+        if gamma <= 0.0:
+            raise ValueError(
+                "gamma must be positive."
+            )
 
         return StepLR(
-
             optimizer,
-
             step_size=step_size,
-
             gamma=gamma,
-
         )
 
-    ###################################################################
+    ###########################################################################
     # MultiStepLR
-    ###################################################################
+    ###########################################################################
 
-    if scheduler == "multistep":
+    if scheduler_name == "multistep":
+
+        if gamma <= 0.0:
+            raise ValueError(
+                "gamma must be positive."
+            )
+
+        if milestones is None:
+            milestones = []
+
+        if any(
+            milestone < 0
+            for milestone in milestones
+        ):
+            raise ValueError(
+                "All milestones must be non-negative."
+            )
 
         return MultiStepLR(
-
             optimizer,
-
-            milestones=milestones or [],
-
+            milestones=milestones,
             gamma=gamma,
-
         )
 
-    ###################################################################
-    # Cosine Annealing
-    ###################################################################
+    ###########################################################################
+    # Cosine
+    ###########################################################################
 
-    if scheduler == "cosine":
+    if scheduler_name == "cosine":
 
         return CosineAnnealingLR(
-
             optimizer,
-
-            T_max=total_steps,
-
+            T_max=max(
+                1,
+                total_steps,
+            ),
         )
 
-    ###################################################################
-    # Warmup + Cosine
-    ###################################################################
+    ###########################################################################
+    # Warmup + cosine
+    ###########################################################################
 
-    if scheduler == "warmup_cosine":
+    if scheduler_name == "warmup_cosine":
+
+        if warmup_steps < 0:
+            raise ValueError(
+                "warmup_steps must be non-negative."
+            )
+
+        if warmup_steps > total_steps:
+            raise ValueError(
+                "warmup_steps cannot exceed total_steps."
+            )
 
         return LambdaLR(
-
             optimizer,
-
-            lambda step: warmup_cosine_lambda(
-
-                step,
-
-                warmup_steps=warmup_steps,
-
-                total_steps=total_steps,
-
+            lr_lambda=lambda step: (
+                warmup_cosine_lambda(
+                    step,
+                    warmup_steps=warmup_steps,
+                    total_steps=total_steps,
+                )
             ),
-
         )
 
     raise ValueError(
-        f"Unknown scheduler '{scheduler}'."
+        f"Unknown scheduler '{scheduler}'. "
+        "Supported values are: "
+        "constant, step, multistep, cosine, warmup_cosine."
     )
+
 
 ###############################################################################
 # Utility
@@ -190,11 +299,19 @@ def build_scheduler(
 
 
 def scheduler_summary(
-    scheduler,
+    scheduler: LRScheduler,
 ) -> str:
+    """
+    Return a concise scheduler description.
+    """
 
     return (
         f"{scheduler.__class__.__name__}"
     )
 
 
+__all__ = [
+    "warmup_cosine_lambda",
+    "build_scheduler",
+    "scheduler_summary",
+]

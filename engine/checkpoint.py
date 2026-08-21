@@ -196,7 +196,7 @@ def save_best_checkpoint(
     checkpoint_dir: str | Path,
     model: nn.Module,
     optimizer: Optimizer,
-    scheduler: LRScheduler,
+    scheduler: LRScheduler | None,
     epoch: int,
     global_step: int,
     metric: float,
@@ -249,7 +249,7 @@ def resume_training(
     checkpoint_dir: str | Path,
     model: nn.Module,
     optimizer: Optimizer,
-    scheduler: LRScheduler,
+    scheduler: LRScheduler | None,
 ):
     """
     Resume from latest checkpoint.

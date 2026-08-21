@@ -134,6 +134,148 @@ class RawTrack:
             "positions": self.positions,
         }
 
+    def to_agent_states(self) -> list[AgentState]:
+        """
+        Convert this trajectory into a sequence of AgentState objects.
+
+        One AgentState is created for every observed timestamp.
+        """
+
+        from datasets.geometry import compute_heading
+
+        states: list[AgentState] = []
+
+        num_points = len(self.positions)
+
+        for timestep in range(num_points):
+
+            if timestep == 0:
+
+                heading = compute_heading(
+                    self.positions[:2]
+                )
+
+            else:
+
+                heading = compute_heading(
+                    self.positions[
+                        max(0, timestep - 1): timestep + 1
+                    ]
+                )
+
+            states.append(
+
+                AgentState(
+
+                    track_id=self.track_id,
+
+                    object_type=self.object_type,
+
+                    category=self.category,
+
+                    timestep=timestep,
+
+                    timestamp=float(self.timestamps[timestep]),
+
+                    position=self.positions[timestep].astype(np.float32),
+
+                    heading=float(heading),
+                )
+
+            )
+
+        return states
+
+###############################################################################
+# Agent State
+###############################################################################
+
+
+@dataclass(slots=True)
+class AgentState:
+    """
+    One observed state of one moving agent.
+
+    This corresponds to a single node in the Scene Graph used by
+    the Global Spatio-Temporal Attention (GSTA) module.
+
+    Unlike RawTrack, which represents an entire trajectory,
+    AgentState represents exactly one observed timestamp.
+
+    Paper notation
+    --------------
+    p_i^s
+        Position of agent i at timestep s.
+
+    θ_i^s
+        Heading of agent i at timestep s.
+
+    β_i^s
+        Timestamp of agent i at timestep s.
+    """
+
+    ###########################################################################
+    # Identity
+    ###########################################################################
+
+    track_id: str
+
+    object_type: str
+
+    category: str
+
+    ###########################################################################
+    # Temporal information
+    ###########################################################################
+
+    timestep: int
+
+    timestamp: float
+
+    ###########################################################################
+    # Geometry
+    ###########################################################################
+
+    position: np.ndarray
+
+    heading: float
+
+    def __post_init__(self) -> None:
+
+        if self.position.shape != (2,):
+            raise ValueError(
+                "position must have shape (2,)."
+            )
+
+    @property
+    def is_target(self) -> bool:
+
+        return self.category.upper() == "AGENT"
+
+    @property
+    def is_av(self) -> bool:
+
+        return self.object_type.upper() == "AV"
+
+    def to_dict(self) -> dict:
+
+        return {
+
+            "track_id": self.track_id,
+
+            "object_type": self.object_type,
+
+            "category": self.category,
+
+            "timestep": self.timestep,
+
+            "timestamp": self.timestamp,
+
+            "position": self.position,
+
+            "heading": self.heading,
+        }
+
 
 ###############################################################################
 # Lane Centerline
@@ -261,6 +403,26 @@ class RawScene:
                 return track
 
         return None
+
+    @property
+    def agent_states(self) -> list[AgentState]:
+        """
+        Flatten every trajectory into AgentState nodes.
+
+        Returns
+        -------
+        list[AgentState]
+        """
+
+        states: list[AgentState] = []
+
+        for track in self.tracks.values():
+
+            states.extend(
+                track.to_agent_states()
+            )
+
+        return states
 
     def clear_lanes(self) -> None:
         self.lanes.clear()

@@ -1,28 +1,27 @@
 """
 models.attention.mhca
 
-Multi-Head Historical Context Attention
+Multi-Head Historical Causal Attention (MHCA).
 
 DSTNet
+------
 Section III-D
-Figure 5
 Equations (16)-(23)
 
-Pipeline
+Input
+-----
+Z^S
 
-Input Features
-        │
-Historical Window Extraction
-        │
-Historical Causal Mask
-        │
-Multi-Window Attention
-        │
-Feature Fusion
-        │
-Residual
-        │
-LayerNorm
+    (B,N,H,K,D)
+
+Output
+------
+Z^ST
+
+    (B,N,H,K,D)
+
+Attention is performed over historical time within each
+temporal window. The prediction-mode dimension K is preserved.
 """
 
 from __future__ import annotations
@@ -32,130 +31,10 @@ import math
 import torch
 from torch import Tensor, nn
 
-from models.layers.feed_forward import FeedForward
-from models.layers.normalization import LayerNorm
-
-
-###############################################################################
-# Historical Causal Mask
-###############################################################################
-
-
-class HistoricalMask(nn.Module):
-    """
-    Lower-triangular causal mask.
-
-    Future timesteps are masked so that each timestep only attends
-    to itself and its past history.
-    """
-
-    def forward(
-        self,
-        window_size: int,
-        device: torch.device,
-    ) -> Tensor:
-
-        return torch.tril(
-            torch.ones(
-                window_size,
-                window_size,
-                dtype=torch.bool,
-                device=device,
-            )
-        )
-
-
-###############################################################################
-# Sliding Window Extraction
-###############################################################################
-
-
-class SlidingWindowExtractor(nn.Module):
-    """
-    Extract fixed-length historical windows.
-
-    Input
-    -----
-    (B,N,T,C)
-
-    Output
-    ------
-    (B,N,T,W,C)
-
-    where
-
-        W = window size
-    """
-
-    def __init__(
-        self,
-        window_size: int,
-    ) -> None:
-
-        super().__init__()
-
-        self.window_size = int(window_size)
-
-    def forward(
-        self,
-        features: Tensor,
-    ) -> Tensor:
-
-        B, N, T, C = features.shape
-
-        windows = []
-
-        for t in range(T):
-
-            start = max(
-                0,
-                t - self.window_size + 1,
-            )
-
-            window = features[
-                :,
-                :,
-                start:t + 1,
-                :,
-            ]
-
-            if window.shape[2] < self.window_size:
-
-                pad = features.new_zeros(
-                    B,
-                    N,
-                    self.window_size - window.shape[2],
-                    C,
-                )
-
-                window = torch.cat(
-                    (
-                        pad,
-                        window,
-                    ),
-                    dim=2,
-                )
-
-            windows.append(
-                window.unsqueeze(2)
-            )
-
-        return torch.cat(
-            windows,
-            dim=2,
-        )
-
-
-###############################################################################
-# Multi-Head Historical Context Attention
-###############################################################################
-
 
 class MHCA(nn.Module):
     """
-    Multi-Head Historical Context Attention.
-
-    Implements the temporal branch of the Tri-Attention Module.
+    Multi-Head Historical Causal Attention.
     """
 
     def __init__(
@@ -167,371 +46,329 @@ class MHCA(nn.Module):
             4,
             8,
         ),
-        expansion: int = 4,
         dropout: float = 0.1,
     ) -> None:
 
         super().__init__()
 
-        if hidden_dim % num_heads != 0:
+        if hidden_dim <= 0:
+            raise ValueError(
+                "hidden_dim must be positive."
+            )
 
+        if num_heads <= 0:
+            raise ValueError(
+                "num_heads must be positive."
+            )
+
+        if hidden_dim % num_heads != 0:
             raise ValueError(
                 "hidden_dim must be divisible by num_heads."
             )
 
-        self.hidden_dim = hidden_dim
-
-        self.num_heads = num_heads
-
-        self.head_dim = hidden_dim // num_heads
-
-        self.window_sizes = tuple(window_sizes)
-
-        #######################################################################
-        # QKV Projection
-        #######################################################################
-
-        self.q_proj = nn.Linear(
-            hidden_dim,
-            hidden_dim,
-        )
-
-        self.k_proj = nn.Linear(
-            hidden_dim,
-            hidden_dim,
-        )
-
-        self.v_proj = nn.Linear(
-            hidden_dim,
-            hidden_dim,
-        )
-
-        #######################################################################
-        # Historical Windows
-        #######################################################################
-
-        self.window_extractors = nn.ModuleDict(
-            {
-                str(size): SlidingWindowExtractor(size)
-                for size in self.window_sizes
-            }
-        )
-
-        self.history_mask = HistoricalMask()
-
-        #######################################################################
-        # Multi-scale Fusion
-        #######################################################################
-
-        self.window_weights = nn.Parameter(
-            torch.ones(
-                len(self.window_sizes),
+        if not window_sizes:
+            raise ValueError(
+                "window_sizes cannot be empty."
             )
+
+        if any(
+            size <= 0
+            for size in window_sizes
+        ):
+            raise ValueError(
+                "All window sizes must be positive."
+            )
+
+        self.hidden_dim = int(hidden_dim)
+        self.num_heads = int(num_heads)
+        self.head_dim = (
+            hidden_dim // num_heads
+        )
+        self.window_sizes = tuple(
+            int(size)
+            for size in window_sizes
         )
 
         #######################################################################
-        # Output Projection
+        # QKV
         #######################################################################
 
-        self.out_proj = nn.Linear(
+        self.query_projection = nn.Linear(
             hidden_dim,
             hidden_dim,
+            bias=False,
+        )
+
+        self.key_projection = nn.Linear(
+            hidden_dim,
+            hidden_dim,
+            bias=False,
+        )
+
+        self.value_projection = nn.Linear(
+            hidden_dim,
+            hidden_dim,
+            bias=False,
         )
 
         #######################################################################
-        # Feed Forward
+        # Multi-scale fusion
         #######################################################################
 
-        self.feed_forward = FeedForward(
-            hidden_dim=hidden_dim,
-            expansion=expansion,
-            dropout=dropout,
-        )
-
-        #######################################################################
-        # Normalization
-        #######################################################################
-
-        self.norm = LayerNorm(
+        self.output_projection = nn.Linear(
+            hidden_dim * len(window_sizes),
             hidden_dim,
+            bias=False,
         )
 
         self.dropout = nn.Dropout(
-            dropout,
+            dropout
         )
 
     ###########################################################################
-    # Head Utilities
+    # Causal mask
     ###########################################################################
 
-    def _split_heads(
+    @staticmethod
+    def _causal_mask(
+        size: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+
+        mask = torch.zeros(
+            size,
+            size,
+            device=device,
+            dtype=dtype,
+        )
+
+        future = torch.triu(
+            torch.ones(
+                size,
+                size,
+                device=device,
+                dtype=torch.bool,
+            ),
+            diagonal=1,
+        )
+
+        return mask.masked_fill(
+            future,
+            torch.finfo(dtype).min,
+        )
+
+    ###########################################################################
+    # One temporal window
+    ###########################################################################
+
+    def _apply_window(
         self,
-        x: Tensor,
+        features: Tensor,
+        window_size: int,
     ) -> Tensor:
         """
-        (B,N,T,C)
-            ->
-        (B,N,H,T,D)
+        Apply causal attention at one temporal scale.
+
+        Input/output:
+
+            (B,N,H,K,D)
         """
 
-        B, N, T, _ = x.shape
+        B, N, H, K_modes, D = features.shape
 
-        x = x.view(
+        num_groups = math.ceil(
+            H / window_size
+        )
+
+        padded_H = (
+            num_groups * window_size
+        )
+
+        pad = padded_H - H
+
+        if pad > 0:
+
+            features = torch.cat(
+                (
+                    features,
+                    features.new_zeros(
+                        B,
+                        N,
+                        pad,
+                        K_modes,
+                        D,
+                    ),
+                ),
+                dim=2,
+            )
+
+        #######################################################################
+        # (B,N,G,S,K,D)
+        #######################################################################
+
+        x = features.reshape(
             B,
             N,
-            T,
+            num_groups,
+            window_size,
+            K_modes,
+            D,
+        )
+
+        Q = self.query_projection(x)
+        K = self.key_projection(x)
+        V = self.value_projection(x)
+
+        #######################################################################
+        # (B,N,G,S,K,D)
+        # ->
+        # (B,N,G,H_a,S,K,Dh)
+        #######################################################################
+
+        Q = Q.reshape(
+            B,
+            N,
+            num_groups,
+            window_size,
+            K_modes,
             self.num_heads,
             self.head_dim,
+        ).permute(
+            0, 1, 2, 5, 3, 4, 6
         )
 
-        x = x.permute(
-            0,
-            1,
-            3,
-            2,
-            4,
-        )
-
-        return x
-
-    def _merge_heads(
-        self,
-        x: Tensor,
-    ) -> Tensor:
-        """
-        (B,N,H,T,D)
-            ->
-        (B,N,T,C)
-        """
-
-        B, N, H, T, D = x.shape
-
-        x = x.permute(
-            0,
-            1,
-            3,
-            2,
-            4,
-        )
-
-        return x.reshape(
+        K = K.reshape(
             B,
             N,
-            T,
-            H * D,
+            num_groups,
+            window_size,
+            K_modes,
+            self.num_heads,
+            self.head_dim,
+        ).permute(
+            0, 1, 2, 5, 3, 4, 6
         )
 
-    ###########################################################################
-    # Historical Attention
-    ###########################################################################
-
-    def _historical_attention(
-        self,
-        query: Tensor,
-        key: Tensor,
-        value: Tensor,
-    ) -> Tensor:
-        """
-        Historical causal attention.
-
-        Input
-        -----
-        (B,N,W,C)
-
-        Output
-        ------
-        (B,N,W,C)
-        """
-
-        B, N, W, _ = query.shape
-
-        q = self._split_heads(
-            self.q_proj(query)
-        )
-
-        k = self._split_heads(
-            self.k_proj(key)
-        )
-
-        v = self._split_heads(
-            self.v_proj(value)
+        V = V.reshape(
+            B,
+            N,
+            num_groups,
+            window_size,
+            K_modes,
+            self.num_heads,
+            self.head_dim,
+        ).permute(
+            0, 1, 2, 5, 3, 4, 6
         )
 
         #######################################################################
-        # Attention Scores
+        # Attention over historical timestep S.
         #######################################################################
 
-        scores = torch.matmul(
-            q,
-            k.transpose(
-                -2,
-                -1,
-            ),
+        scores = torch.einsum(
+            "bnghsmd,bnghtmd->bnghsmt",
+            Q,
+            K,
         )
 
         scores = scores / math.sqrt(
-            self.head_dim,
+            self.head_dim
+        )
+
+        causal = self._causal_mask(
+            window_size,
+            device=scores.device,
+            dtype=scores.dtype,
+        )
+
+        scores = scores + causal.view(
+            1,
+            1,
+            1,
+            1,
+            window_size,
+            1,
+            window_size,
         )
 
         #######################################################################
-        # Historical Mask
+        # Padding mask.
         #######################################################################
 
-        mask = self.history_mask(
-            W,
-            query.device,
+        valid = torch.arange(
+            padded_H,
+            device=features.device,
+        ) < H
+
+        valid = valid.reshape(
+            num_groups,
+            window_size,
+        )
+
+        key_valid = valid.view(
+            1,
+            1,
+            num_groups,
+            1,
+            1,
+            1,
+            window_size,
         )
 
         scores = scores.masked_fill(
-            ~mask.view(
-                1,
-                1,
-                1,
-                W,
-                W,
-            ),
+            ~key_valid,
             torch.finfo(scores.dtype).min,
         )
-
-        #######################################################################
-        # Softmax
-        #######################################################################
 
         attention = torch.softmax(
             scores,
             dim=-1,
         )
 
+        attention = attention.masked_fill(
+            ~key_valid,
+            0.0,
+        )
+
         attention = self.dropout(
+            attention
+        )
+
+        #######################################################################
+        # Weighted values.
+        #######################################################################
+
+        attended = torch.einsum(
+            "bnghsmt,bnghtmd->bnghsmd",
             attention,
+            V,
         )
 
         #######################################################################
-        # Aggregate
+        # (B,N,G,H_a,S,K,Dh)
+        # ->
+        # (B,N,G,S,K,D)
         #######################################################################
 
-        output = torch.matmul(
-            attention,
-            v,
+        attended = attended.permute(
+            0,
+            1,
+            2,
+            4,
+            5,
+            3,
+            6,
+        ).reshape(
+            B,
+            N,
+            padded_H,
+            K_modes,
+            D,
         )
 
-        output = self._merge_heads(
-            output,
-        )
-
-        return output
-
-    ###########################################################################
-    # One Temporal Window
-    ###########################################################################
-
-    def _window_attention(
-        self,
-        windows: Tensor,
-    ) -> Tensor:
-        """
-        Apply MHCA inside every temporal window.
-
-        Input
-        -----
-        windows
-
-        Shape
-
-            (B,N,T,W,C)
-
-        Returns
-        -------
-            (B,N,T,C)
-        """
-
-        B, N, T, W, C = windows.shape
-
-        outputs = []
-
-        for t in range(T):
-
-            window = windows[
-                :,
-                :,
-                t,
-            ]
-
-            attended = self._historical_attention(
-                window,
-                window,
-                window,
-            )
-
-            outputs.append(
-                attended[
-                    :,
-                    :,
-                    -1,
-                ].unsqueeze(2)
-            )
-
-        return torch.cat(
-            outputs,
-            dim=2,
-        )
-
-    ###########################################################################
-    # Multi-scale Fusion
-    ###########################################################################
-
-    def _multi_scale_attention(
-        self,
-        features: Tensor,
-    ) -> Tensor:
-        """
-        Apply multiple historical window sizes and fuse their outputs.
-
-        Parameters
-        ----------
-        features
-            Shape (B,N,T,C)
-
-        Returns
-        -------
-        Tensor
-            Shape (B,N,T,C)
-        """
-
-        outputs = []
-
-        #######################################################################
-        # Multi-scale windows
-        #######################################################################
-
-        for window_size in self.window_sizes:
-
-            windows = self.window_extractors[
-                str(window_size)
-            ](
-                features,
-            )
-
-            outputs.append(
-                self._window_attention(
-                    windows,
-                )
-            )
-
-        #######################################################################
-        # Learnable fusion
-        #######################################################################
-
-        fused = torch.stack(outputs, dim=0)
-
-        weights = torch.softmax(
-            self.window_weights,
-            dim=0,
-        ).view(-1, 1, 1, 1, 1)
-
-        fused = (weights * fused).sum(dim=0)
-
-        return fused
+        return attended[:, :, :H]
 
     ###########################################################################
     # Forward
@@ -539,75 +376,86 @@ class MHCA(nn.Module):
 
     def forward(
         self,
-        features: Tensor,
+        spatial_embeddings: Tensor,
+        *,
+        agent_mask: Tensor | None = None,
     ) -> Tensor:
-        """
-        Multi-Head Historical Context Attention.
 
-        Parameters
-        ----------
-        features
-            Shape (B,N,T,C)
+        if spatial_embeddings.ndim != 5:
+            raise ValueError(
+                "spatial_embeddings must have shape "
+                "(B,N,H,K,D)."
+            )
 
-        Returns
-        -------
-        Tensor
-            Shape (B,N,T,C)
-        """
+        B, N, H, K_modes, D = (
+            spatial_embeddings.shape
+        )
 
-        residual = features
+        if D != self.hidden_dim:
+            raise ValueError(
+                f"Expected hidden_dim={self.hidden_dim}, got {D}."
+            )
+
+        if agent_mask is not None:
+
+            if agent_mask.shape != (
+                B,
+                N,
+            ):
+                raise ValueError(
+                    "agent_mask must have shape (B,N)."
+                )
 
         #######################################################################
-        # Pre-Norm
+        # Multi-scale temporal attention.
         #######################################################################
 
-        x = self.norm(
-            features,
+        outputs = [
+            self._apply_window(
+                spatial_embeddings,
+                size,
+            )
+            for size in self.window_sizes
+        ]
+
+        #######################################################################
+        # Concatenate temporal scales.
+        #######################################################################
+
+        output = torch.cat(
+            outputs,
+            dim=-1,
         )
 
         #######################################################################
-        # Multi-scale Historical Attention
+        # Eq. (23)
         #######################################################################
 
-        x = self._multi_scale_attention(
-            x,
+        output = self.output_projection(
+            output
+        )
+
+        output = self.dropout(
+            output
         )
 
         #######################################################################
-        # Output Projection
+        # Invalid agents.
         #######################################################################
 
-        x = self.out_proj(
-            x,
-        )
+        if agent_mask is not None:
 
-        x = self.dropout(
-            x,
-        )
+            output = output.masked_fill(
+                ~agent_mask.bool()
+                .unsqueeze(-1)
+                .unsqueeze(-1)
+                .unsqueeze(-1),
+                0.0,
+            )
 
-        #######################################################################
-        # Residual
-        #######################################################################
+        return output
 
-        x = residual + x
-
-        #######################################################################
-        # Feed Forward
-        #######################################################################
-
-        x = self.feed_forward(
-            x,
-        )
-
-        return x
-
-    ###########################################################################
-    # Representation
-    ###########################################################################
-
-    def extra_repr(
-        self,
-    ) -> str:
+    def extra_repr(self) -> str:
 
         return (
             f"hidden_dim={self.hidden_dim}, "
@@ -615,3 +463,5 @@ class MHCA(nn.Module):
             f"window_sizes={self.window_sizes}"
         )
 
+
+__all__ = ["MHCA"]

@@ -1,16 +1,15 @@
 """
 datasets.scene_data
 
-Processed scene representation for DSTNet.
-
-This module defines the canonical data structure exchanged between
-the preprocessing pipeline and the neural network.
+Canonical processed scene representation for DSTNet.
 
 Pipeline
 --------
 RawScene
     ↓
 ScenePreprocessor
+    ↓
+SceneGraphBuilder
     ↓
 SceneData
     ↓
@@ -26,24 +25,29 @@ from typing import Any
 
 import numpy as np
 
-from datasets.graph_builder import GraphData
+from datasets.scene_graph_builder import SceneGraph
 
 
 ###############################################################################
 # SceneData
 ###############################################################################
 
+
 @dataclass(slots=True)
 class SceneData:
     """
-    Fully processed scene.
+    Canonical processed scene.
 
-    All coordinates are already normalized into the target-agent
-    reference frame.
+    All geometric quantities are expressed in the target-agent
+    local reference frame.
+
+    The SceneGraph contains the complete interaction graph used by
+    the encoder, while this class stores the processed numerical
+    features required by the model.
     """
 
     ###########################################################################
-    # Metadata
+    # Scene Metadata
     ###########################################################################
 
     sequence_id: str
@@ -51,7 +55,7 @@ class SceneData:
     city: str
 
     ###########################################################################
-    # Reference Frame
+    # Local Reference Frame
     ###########################################################################
 
     origin: np.ndarray
@@ -62,36 +66,30 @@ class SceneData:
     heading: float
 
     ###########################################################################
-    # Processed Agents
+    # Processed Dynamic Agents
     ###########################################################################
 
     agents: list[dict[str, Any]]
 
     ###########################################################################
-    # Processed Lanes
+    # Processed Map Elements
     ###########################################################################
 
-    lanes: list[dict[str, Any]]
+    maps: list[dict[str, Any]]
 
     ###########################################################################
-    # Graph
+    # Scene Graph
     ###########################################################################
 
-    graph: GraphData
-
-    ###########################################################################
-    # Cached Geometry
-    ###########################################################################
-
-    agent_positions: np.ndarray | None = None
-
-    lane_positions: np.ndarray | None = None
+    scene_graph: SceneGraph
 
     ###########################################################################
     # Validation
     ###########################################################################
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+    ) -> None:
 
         if self.origin.shape != (2,):
             raise ValueError(
@@ -100,56 +98,88 @@ class SceneData:
 
         if not isinstance(
             self.heading,
-            (float, np.floating),
+            (
+                float,
+                np.floating,
+            ),
         ):
             raise TypeError(
                 "heading must be a float."
             )
 
         #######################################################################
-        # Cache commonly used geometry
+        # Validate graph consistency
         #######################################################################
 
-        if self.agent_positions is None:
-
-            self.agent_positions = self.graph.agent_positions
-
-        if self.lane_positions is None:
-
-            self.lane_positions = self.graph.lane_positions
+        self.scene_graph.validate()
 
     ###########################################################################
-    # Properties
+    # Basic Properties
     ###########################################################################
 
     @property
-    def num_agents(self) -> int:
-        return len(self.agents)
+    def num_agents(
+        self,
+    ) -> int:
+
+        return len(
+            self.agents
+        )
 
     @property
-    def num_lanes(self) -> int:
-        return len(self.lanes)
+    def num_maps(
+        self,
+    ) -> int:
+
+        return len(
+            self.maps
+        )
 
     @property
-    def num_agent_edges(self) -> int:
-        return self.graph.agent_agent_edges.shape[1]
+    def num_agent_states(
+        self,
+    ) -> int:
+
+        return self.scene_graph.num_agent_states
 
     @property
-    def num_lane_edges(self) -> int:
-        return self.graph.lane_lane_edges.shape[1]
+    def num_temporal_edges(
+        self,
+    ) -> int:
+
+        return self.scene_graph.temporal_edges.shape[1]
 
     @property
-    def num_lane_agent_edges(self) -> int:
-        return self.graph.lane_agent_edges.shape[1]
+    def num_spatial_edges(
+        self,
+    ) -> int:
 
-        ###########################################################################
+        return self.scene_graph.spatial_edges.shape[1]
+
+    @property
+    def num_agent_map_edges(
+        self,
+    ) -> int:
+
+        return self.scene_graph.agent_map_edges.shape[1]
+
+    @property
+    def num_map_map_edges(
+        self,
+    ) -> int:
+
+        return self.scene_graph.map_map_edges.shape[1]
+
+    ###########################################################################
     # Agent Utilities
     ###########################################################################
 
     @property
-    def target_agent(self) -> dict[str, Any]:
+    def target_agent(
+        self,
+    ) -> dict[str, Any]:
         """
-        Return the prediction target (AGENT).
+        Return the prediction target agent.
         """
 
         for agent in self.agents:
@@ -158,78 +188,115 @@ class SceneData:
                 return agent
 
         raise RuntimeError(
-            "Target agent not found."
+            "Prediction target not found."
         )
 
     @property
-    def av_agent(self) -> dict[str, Any] | None:
+    def av_agent(
+        self,
+    ) -> dict[str, Any] | None:
         """
-        Return the autonomous vehicle.
+        Return the autonomous vehicle if present.
         """
 
         for agent in self.agents:
 
-            if agent["object_type"] == "AV":
+            if agent["object_type"].upper() == "AV":
                 return agent
 
         return None
 
     ###########################################################################
-    # Utilities
+    # Scene Statistics
     ###########################################################################
 
-    def summary(self) -> dict[str, Any]:
+    def summary(
+        self,
+    ) -> dict[str, Any]:
         """
-        Return scene statistics.
+        Return a concise summary of the processed scene.
         """
 
         return {
+
             "sequence_id": self.sequence_id,
+
             "city": self.city,
 
             "num_agents": self.num_agents,
-            "num_lanes": self.num_lanes,
 
-            "agent_edges": self.num_agent_edges,
-            "lane_edges": self.num_lane_edges,
-            "lane_agent_edges": self.num_lane_agent_edges,
+            "num_maps": self.num_maps,
 
-            "agent_radius": self.graph.agent_radius,
-            "lane_radius": self.graph.lane_radius,
+            "num_agent_states": self.num_agent_states,
+
+            "temporal_edges": self.num_temporal_edges,
+
+            "spatial_edges": self.num_spatial_edges,
+
+            "agent_map_edges": self.num_agent_map_edges,
+
+            "map_map_edges": self.num_map_map_edges,
+
+            "spatial_radius": self.scene_graph.spatial_radius,
+
+            "map_radius": self.scene_graph.map_radius,
         }
 
-    def to_dict(self) -> dict[str, Any]:
+    ###########################################################################
+    # Serialization
+    ###########################################################################
+
+    def to_dict(
+        self,
+    ) -> dict[str, Any]:
         """
-        Convert the scene into a dictionary.
+        Convert SceneData into a dictionary.
         """
 
         return {
+
             "sequence_id": self.sequence_id,
+
             "city": self.city,
 
             "origin": self.origin,
+
             "heading": self.heading,
 
             "agents": self.agents,
-            "lanes": self.lanes,
 
-            "agent_positions": self.agent_positions,
-            "lane_positions": self.lane_positions,
+            "maps": self.maps,
 
-            "graph": self.graph,
+            "scene_graph": self.scene_graph,
         }
 
-    def __len__(self) -> int:
+    ###########################################################################
+    # Standard Methods
+    ###########################################################################
+
+    def __len__(
+        self,
+    ) -> int:
+
         return self.num_agents
 
-    def __repr__(self) -> str:
+    def __repr__(
+        self,
+    ) -> str:
 
         return (
+
             "SceneData("
+
             f"sequence='{self.sequence_id}', "
+
             f"agents={self.num_agents}, "
-            f"lanes={self.num_lanes}, "
-            f"agent_edges={self.num_agent_edges})"
+
+            f"maps={self.num_maps}, "
+
+            f"agent_states={self.num_agent_states}, "
+
+            f"temporal_edges={self.num_temporal_edges}, "
+
+            f"spatial_edges={self.num_spatial_edges})"
         )
-
-

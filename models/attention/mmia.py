@@ -1,245 +1,117 @@
 """
 models.attention.mmia
 
-Multi-Modal Interaction Attention (MMIA)
+Multi-Mode Interaction Attention (MMIA).
 
 DSTNet
+------
 Section III-D
+Equation (24)
 
-Pipeline
+Input
+-----
+Z^ST
 
-Agent Features
-        │
-Lane Features
-        │
-        ▼
-Agent → Lane Attention
-        │
-        ▼
-Lane → Agent Attention
-        │
-        ▼
-Learnable Gated Fusion
-        │
-        ▼
-Feed Forward
+    (B,N,H,K,D)
+
+Output
+------
+Z^STM
+
+    (B,N,H,K,D)
+
+Attention is performed ONLY across prediction modes K.
 """
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import Tensor, nn
-
-from models.layers.attention import MultiHeadAttention
-from models.layers.feed_forward import FeedForward
-from models.layers.normalization import LayerNorm
-
-
-###############################################################################
-# MMIA
-###############################################################################
 
 
 class MMIA(nn.Module):
     """
-    Multi-Modal Interaction Attention.
+    Multi-Mode Interaction Attention.
 
-    Performs bidirectional interaction between
+    For every agent n and historical timestep t:
 
-        • agent features
+        Z^STM_(n,t,k)
+            =
+        MHA(
+            Z^ST_(n,t,k),
+            Z^ST_(n,t,1:K),
+            Z^ST_(n,t,1:K)
+        )
 
-        • lane features
-
-    using symmetric cross-attention followed by gated fusion.
+    Therefore K is the attention sequence dimension.
     """
 
     def __init__(
         self,
         hidden_dim: int,
         num_heads: int,
-        expansion: int = 4,
         dropout: float = 0.1,
     ) -> None:
 
         super().__init__()
 
-        self.hidden_dim = hidden_dim
+        if hidden_dim <= 0:
+            raise ValueError(
+                "hidden_dim must be positive."
+            )
 
-        self.num_heads = num_heads
+        if num_heads <= 0:
+            raise ValueError(
+                "num_heads must be positive."
+            )
 
-        #######################################################################
-        # Agent -> Lane
-        #######################################################################
+        if hidden_dim % num_heads != 0:
+            raise ValueError(
+                "hidden_dim must be divisible by num_heads."
+            )
 
-        self.agent_to_lane = MultiHeadAttention(
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
+        self.hidden_dim = int(hidden_dim)
+        self.num_heads = int(num_heads)
+        self.head_dim = (
+            hidden_dim // num_heads
         )
 
         #######################################################################
-        # Lane -> Agent
+        # QKV
         #######################################################################
 
-        self.lane_to_agent = MultiHeadAttention(
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-        )
-
-        #######################################################################
-        # Learnable Gates
-        #######################################################################
-
-        self.agent_gate = nn.Sequential(
-            nn.Linear(
-                hidden_dim * 2,
-                hidden_dim,
-            ),
-            nn.Sigmoid(),
-        )
-
-        self.lane_gate = nn.Sequential(
-            nn.Linear(
-                hidden_dim * 2,
-                hidden_dim,
-            ),
-            nn.Sigmoid(),
-        )
-
-        #######################################################################
-        # Feed Forward
-        #######################################################################
-
-        self.feed_forward = FeedForward(
-            hidden_dim=hidden_dim,
-            expansion=expansion,
-            dropout=dropout,
-        )
-
-        #######################################################################
-        # LayerNorm
-        #######################################################################
-
-        self.agent_norm = LayerNorm(
+        self.query_projection = nn.Linear(
             hidden_dim,
+            hidden_dim,
+            bias=False,
         )
 
-        self.lane_norm = LayerNorm(
+        self.key_projection = nn.Linear(
             hidden_dim,
+            hidden_dim,
+            bias=False,
+        )
+
+        self.value_projection = nn.Linear(
+            hidden_dim,
+            hidden_dim,
+            bias=False,
+        )
+
+        #######################################################################
+        # Output projection
+        #######################################################################
+
+        self.output_projection = nn.Linear(
+            hidden_dim,
+            hidden_dim,
+            bias=False,
         )
 
         self.dropout = nn.Dropout(
-            dropout,
-        )
-
-    ###########################################################################
-    # Agent → Lane Attention
-    ###########################################################################
-
-    def _agent_to_lane_attention(
-        self,
-        agent_features: Tensor,
-        lane_features: Tensor,
-        lane_mask: Tensor | None = None,
-    ) -> Tensor:
-        """
-        Update agent features using lane context.
-
-        Query : Agent features
-
-        Key/Value : Lane features
-        """
-
-        residual = agent_features
-
-        x = self.agent_norm(
-            agent_features,
-        )
-
-        context = self.agent_to_lane(
-            query=x,
-            key=lane_features,
-            value=lane_features,
-            mask=lane_mask,
-        )
-
-        context = self.dropout(
-            context,
-        )
-
-        return residual + context
-
-    ###########################################################################
-    # Lane → Agent Attention
-    ###########################################################################
-
-    def _lane_to_agent_attention(
-        self,
-        lane_features: Tensor,
-        agent_features: Tensor,
-        agent_mask: Tensor | None = None,
-    ) -> Tensor:
-        """
-        Update lane features using agent context.
-
-        Query : Lane features
-
-        Key/Value : Agent features
-        """
-
-        residual = lane_features
-
-        x = self.lane_norm(
-            lane_features,
-        )
-
-        context = self.lane_to_agent(
-            query=x,
-            key=agent_features,
-            value=agent_features,
-            mask=agent_mask,
-        )
-
-        context = self.dropout(
-            context,
-        )
-
-        return residual + context
-
-    ###########################################################################
-    # Learnable Gated Fusion
-    ###########################################################################
-
-    def _gated_fusion(
-        self,
-        original: Tensor,
-        updated: Tensor,
-        gate: nn.Module,
-    ) -> Tensor:
-        """
-        Learnable gated residual fusion.
-
-        gate = σ(W[x; y])
-
-        output = gate ⊙ y + (1-gate) ⊙ x
-        """
-
-        fusion = torch.cat(
-            (
-                original,
-                updated,
-            ),
-            dim=-1,
-        )
-
-        alpha = gate(
-            fusion,
-        )
-
-        return (
-            alpha * updated
-            + (1.0 - alpha) * original
+            dropout
         )
 
     ###########################################################################
@@ -248,94 +120,159 @@ class MMIA(nn.Module):
 
     def forward(
         self,
-        *,
-        agent_features: Tensor,
-        lane_features: Tensor,
-        agent_mask: Tensor | None = None,
-        lane_mask: Tensor | None = None,
-    ) -> tuple[
-        Tensor,
-        Tensor,
-    ]:
+        spatio_temporal_embeddings: Tensor,
+    ) -> Tensor:
         """
-        Bidirectional agent-lane interaction.
+        Apply Eq. (24).
 
-        Parameters
-        ----------
-        agent_features
-            Shape (B,N,C)
+        Input:
 
-        lane_features
-            Shape (B,L,C)
+            (B,N,H,K,D)
 
-        Returns
-        -------
-        Updated
+        Output:
 
-            agent_features
-
-            lane_features
+            (B,N,H,K,D)
         """
 
-        #######################################################################
-        # Cross Attention
-        #######################################################################
+        if spatio_temporal_embeddings.ndim != 5:
+            raise ValueError(
+                "spatio_temporal_embeddings must have shape "
+                "(B,N,H,K,D)."
+            )
 
-        updated_agents = self._agent_to_lane_attention(
-            agent_features,
-            lane_features,
-            lane_mask,
+        B, N, H, K_modes, D = (
+            spatio_temporal_embeddings.shape
         )
 
-        updated_lanes = self._lane_to_agent_attention(
-            lane_features,
-            agent_features,
-            agent_mask,
-        )
+        if D != self.hidden_dim:
+            raise ValueError(
+                f"Expected hidden_dim={self.hidden_dim}, got {D}."
+            )
 
         #######################################################################
-        # Learnable Gated Fusion
+        # Collapse B, N and H.
+        #
+        # Every (agent,time) pair gets an independent K-mode attention
+        # sequence.
         #######################################################################
 
-        updated_agents = self._gated_fusion(
-            original=agent_features,
-            updated=updated_agents,
-            gate=self.agent_gate,
-        )
-
-        updated_lanes = self._gated_fusion(
-            original=lane_features,
-            updated=updated_lanes,
-            gate=self.lane_gate,
+        x = spatio_temporal_embeddings.reshape(
+            B * N * H,
+            K_modes,
+            D,
         )
 
         #######################################################################
-        # Feed Forward
+        # QKV
         #######################################################################
 
-        updated_agents = self.feed_forward(
-            updated_agents,
+        Q = self.query_projection(x)
+        K = self.key_projection(x)
+        V = self.value_projection(x)
+
+        #######################################################################
+        # Split heads.
+        #######################################################################
+
+        Q = Q.reshape(
+            B * N * H,
+            K_modes,
+            self.num_heads,
+            self.head_dim,
+        ).transpose(
+            1,
+            2,
         )
 
-        updated_lanes = self.feed_forward(
-            updated_lanes,
+        K = K.reshape(
+            B * N * H,
+            K_modes,
+            self.num_heads,
+            self.head_dim,
+        ).transpose(
+            1,
+            2,
         )
 
-        return (
-            updated_agents,
-            updated_lanes,
+        V = V.reshape(
+            B * N * H,
+            K_modes,
+            self.num_heads,
+            self.head_dim,
+        ).transpose(
+            1,
+            2,
         )
 
-    ###########################################################################
-    # Representation
-    ###########################################################################
+        #######################################################################
+        # Attention over K.
+        #######################################################################
 
-    def extra_repr(
-        self,
-    ) -> str:
+        scores = torch.matmul(
+            Q,
+            K.transpose(
+                -2,
+                -1,
+            ),
+        )
+
+        scores = scores / math.sqrt(
+            self.head_dim
+        )
+
+        attention = torch.softmax(
+            scores,
+            dim=-1,
+        )
+
+        attention = self.dropout(
+            attention
+        )
+
+        #######################################################################
+        # Aggregate values.
+        #######################################################################
+
+        output = torch.matmul(
+            attention,
+            V,
+        )
+
+        #######################################################################
+        # Merge heads.
+        #######################################################################
+
+        output = output.transpose(
+            1,
+            2,
+        ).reshape(
+            B * N * H,
+            K_modes,
+            D,
+        )
+
+        output = self.output_projection(
+            output
+        )
+
+        #######################################################################
+        # Restore scene dimensions.
+        #######################################################################
+
+        return output.reshape(
+            B,
+            N,
+            H,
+            K_modes,
+            D,
+        )
+
+    def extra_repr(self) -> str:
 
         return (
             f"hidden_dim={self.hidden_dim}, "
             f"num_heads={self.num_heads}"
         )
 
+
+__all__ = ["MMIA"]

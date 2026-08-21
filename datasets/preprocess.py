@@ -3,13 +3,46 @@ datasets.preprocess
 
 Preprocessing pipeline for DSTNet.
 
-Converts RawScene into normalized numerical features.
+Transforms a RawScene into the canonical SceneData representation.
+
+Pipeline
+--------
+RawScene
+    ↓
+Reference Frame Normalization
+    ↓
+Agent Feature Extraction
+Map Feature Extraction
+    ↓
+SceneGraphBuilder
+    ↓
+SceneData
+
+Important
+---------
+The SceneGraph is constructed from the SAME processed agent/map
+representations that are supplied to the neural network.
+
+Therefore:
+
+    AgentEncoder
+        (N,H,2)
+            ↓
+        (N,H,D)
+
+and:
+
+    SceneGraph
+        N × H agent-state nodes
+
+refer to exactly the same observations.
 """
 
 from __future__ import annotations
 
-import numpy as np
 from typing import Any
+
+import numpy as np
 
 from datasets.geometry import (
     compute_acceleration,
@@ -20,34 +53,71 @@ from datasets.geometry import (
     sample_centerline,
     transform_points,
 )
+
+from datasets.raw_scene import RawScene
 from datasets.scene_data import SceneData
-from datasets.graph_builder import GraphBuilder
-from datasets.raw_scene import RawLane, RawScene
+from datasets.scene_graph_builder import SceneGraphBuilder
+
+
+###############################################################################
+# Scene Preprocessor
+###############################################################################
 
 
 class ScenePreprocessor:
     """
-    Preprocess one RawScene.
+    Convert a RawScene into a SceneData object.
+
+    All geometric quantities are transformed into the target-agent
+    local reference frame before constructing the SceneGraph.
+
+    The graph is built from the processed observation history,
+    not directly from the raw CSV states.
     """
 
     def __init__(
         self,
         observation_steps: int,
         prediction_steps: int,
-        lane_sample_points: int,
-        agent_radius: float,
-        lane_radius: float,
+        map_sample_points: int,
+        spatial_radius: float,
+        map_radius: float,
     ) -> None:
 
-        self.observation_steps = observation_steps
+        if observation_steps <= 0:
+            raise ValueError(
+                "observation_steps must be positive."
+            )
 
-        self.prediction_steps = prediction_steps
+        if prediction_steps < 0:
+            raise ValueError(
+                "prediction_steps cannot be negative."
+            )
 
-        self.lane_sample_points = lane_sample_points
+        if map_sample_points <= 0:
+            raise ValueError(
+                "map_sample_points must be positive."
+            )
 
-        self.graph_builder = GraphBuilder(
-            agent_radius=agent_radius,
-            lane_radius=lane_radius,
+        self.observation_steps = int(
+            observation_steps
+        )
+
+        self.prediction_steps = int(
+            prediction_steps
+        )
+
+        self.map_sample_points = int(
+            map_sample_points
+        )
+
+        #######################################################################
+        # Scene Graph Builder
+        #######################################################################
+
+        self.graph_builder = SceneGraphBuilder(
+            spatial_radius=spatial_radius,
+            map_radius=map_radius,
         )
 
     ###########################################################################
@@ -59,30 +129,90 @@ class ScenePreprocessor:
         scene: RawScene,
     ) -> SceneData:
         """
-        Preprocess one scene.
+        Preprocess one RawScene.
 
         Returns
         -------
-        dict
-            Intermediate processed representation.
+        SceneData
+            Canonical processed scene representation.
         """
 
-        origin, heading = self._reference_frame(scene)
+        #######################################################################
+        # Reference frame
+        #######################################################################
+
+        origin, heading = self._reference_frame(
+            scene,
+        )
+
+        #######################################################################
+        # Process agents
+        #######################################################################
 
         agents = self._process_agents(
-            scene,
-            origin,
-            heading,
+            scene=scene,
+            origin=origin,
+            heading=heading,
         )
 
-        lanes = self._process_lanes(
-            scene,
-            origin,
-            heading,
+        #######################################################################
+        # Process maps
+        #######################################################################
+
+        maps = self._process_maps(
+            scene=scene,
+            origin=origin,
+            heading=heading,
         )
 
-        # Build the geometric interaction graph using the# normalized scene representation.
-        graph = self.graph_builder.build(scene)
+        #######################################################################
+        # Build SceneGraph
+        #
+        # IMPORTANT:
+        #
+        # The graph is constructed from the processed representation.
+        #
+        # Therefore:
+        #
+        #     graph positions == model input positions
+        #
+        # and:
+        #
+        #     graph states == AgentEncoder states
+        #######################################################################
+
+        scene_graph = self.graph_builder.build(
+            agents=agents,
+            maps=maps,
+        )
+
+        #######################################################################
+        # Explicit graph/model state invariant
+        #######################################################################
+
+        expected_agent_states = (
+            len(agents)
+            * self.observation_steps
+        )
+
+        actual_agent_states = (
+            scene_graph.num_agent_states
+        )
+
+        if actual_agent_states != expected_agent_states:
+
+            raise ValueError(
+                "SceneGraph agent-state count does not match "
+                "the AgentEncoder observation space: "
+                f"expected {len(agents)} × "
+                f"{self.observation_steps} = "
+                f"{expected_agent_states}, "
+                f"got {actual_agent_states}."
+            )
+
+        #######################################################################
+        # Construct SceneData
+        #######################################################################
 
         return SceneData(
             sequence_id=scene.metadata.sequence_id,
@@ -90,12 +220,12 @@ class ScenePreprocessor:
             origin=origin,
             heading=heading,
             agents=agents,
-            lanes=lanes,
-            graph=graph,
+            maps=maps,
+            scene_graph=scene_graph,
         )
 
-        ###########################################################################
-    # Reference Frame
+    ###########################################################################
+    # Local Reference Frame
     ###########################################################################
 
     def _reference_frame(
@@ -103,21 +233,62 @@ class ScenePreprocessor:
         scene: RawScene,
     ) -> tuple[np.ndarray, float]:
         """
-        Compute the local reference frame.
+        Compute the target-agent local coordinate frame.
 
-        The reference frame is centered at the target agent's
-        last observed position and aligned with its heading.
+        Origin
+        ------
+        Last observed position of the prediction target.
+
+        Heading
+        -------
+        Heading of the prediction target over the observed history.
         """
 
         target = scene.target_track
 
-        observed = target.positions[: self.observation_steps]
+        #######################################################################
+        # Ensure enough target observations exist
+        #######################################################################
+
+        if len(target.positions) < self.observation_steps:
+
+            raise ValueError(
+                "Prediction target does not contain enough "
+                "observations for the configured observation window: "
+                f"required {self.observation_steps}, "
+                f"available {len(target.positions)}."
+            )
+
+        #######################################################################
+        # Observed target trajectory
+        #######################################################################
+
+        observed = target.positions[
+            : self.observation_steps
+        ]
+
+        #######################################################################
+        # Local-frame origin
+        #######################################################################
 
         origin = observed[-1]
 
-        heading = compute_heading(observed)
+        #######################################################################
+        # Target heading
+        #######################################################################
 
-        return origin.astype(np.float32), heading
+        heading = compute_heading(
+            observed,
+        )
+
+        return (
+            origin.astype(
+                np.float32,
+            ),
+            float(
+                heading,
+            ),
+        )
 
     ###########################################################################
     # Agent Processing
@@ -130,83 +301,232 @@ class ScenePreprocessor:
         heading: float,
     ) -> list[dict[str, Any]]:
         """
-        Process all agent trajectories.
+        Process all dynamic agents.
+
+        Every agent contributes exactly ``observation_steps`` states
+        to the SceneGraph.
+
+        The processed representation contains:
+
+            observed
+            future
+            velocity
+            acceleration
+            speed
+            heading
+            timestamps
+
+        All positions are expressed in the target-agent local frame.
         """
 
-        processed_agents: list[dict[str, Any]] = []
+        processed_agents: list[
+            dict[str, Any]
+        ] = []
+
+        #######################################################################
+        # Iterate over tracks
+        #######################################################################
 
         for track in scene.tracks.values():
 
-            trajectory = track.positions.copy()
+            ###################################################################
+            # Validate observation availability
+            ###################################################################
+
+            if len(track.positions) < self.observation_steps:
+
+                # A track that does not exist for the complete observation
+                # window cannot produce the fixed N × H representation
+                # required by the current DSTNet implementation.
+                continue
+
+            ###################################################################
+            # Normalize trajectory
+            ###################################################################
 
             trajectory = transform_points(
-                trajectory,
+                track.positions,
                 origin,
                 heading,
+            ).astype(
+                np.float32,
             )
 
-            observed = trajectory[: self.observation_steps]
+            ###################################################################
+            # Observation trajectory
+            ###################################################################
+
+            observed = trajectory[
+                : self.observation_steps
+            ]
+
+            ###################################################################
+            # Future trajectory
+            ###################################################################
 
             future = trajectory[
                 self.observation_steps:
-                self.observation_steps + self.prediction_steps
+                self.observation_steps
+                + self.prediction_steps
             ]
+
+            ###################################################################
+            # Observed timestamps
+            ####################################################################
+
+            timestamps = np.asarray(
+                track.timestamps[
+                    : self.observation_steps
+                ],
+                dtype=np.float32,
+            )
+
+            if len(timestamps) != self.observation_steps:
+
+                raise ValueError(
+                    f"Track '{track.track_id}' contains "
+                    f"{len(timestamps)} observed timestamps, "
+                    f"expected {self.observation_steps}."
+                )
+
+            ###################################################################
+            # Motion features
+            ###################################################################
 
             velocity = compute_velocity(
                 observed,
-            )
-
-            speed = compute_speed(
-                observed,
+            ).astype(
+                np.float32,
             )
 
             acceleration = compute_acceleration(
                 observed,
+            ).astype(
+                np.float32,
+            )
+
+            speed = compute_speed(
+                observed,
+            ).astype(
+                np.float32,
             )
 
             headings = compute_headings(
                 observed,
+            ).astype(
+                np.float32,
             )
+
+            ###################################################################
+            # Processed agent representation
+            ###################################################################
 
             processed_agents.append(
                 {
+                    ################################################################
+                    # Identity
+                    ################################################################
+
                     "track_id": track.track_id,
+
                     "object_type": track.object_type,
+
                     "category": track.category,
+
+                    ################################################################
+                    # Trajectory
+                    ################################################################
+
                     "observed": observed,
-                    "future": future,
+
+                    "future": future.astype(
+                        np.float32,
+                    ),
+
+                    ################################################################
+                    # Temporal information
+                    ################################################################
+
+                    "timestamps": timestamps,
+
+                    ################################################################
+                    # Motion features
+                    ################################################################
+
                     "velocity": velocity,
-                    "speed": speed,
+
                     "acceleration": acceleration,
-                    "heading": headings,
-                    "last_position": observed[-1],
+
+                    "speed": speed,
+
+                    ################################################################
+                    # Heading
+                    #
+                    # Singular key intentionally used here.
+                    #
+                    # SceneGraphBuilder consumes:
+                    #
+                    #     agent["heading"]
+                    #
+                    ################################################################
+
+                    "headings": headings,
+
+                    ################################################################
+                    # Convenience current state
+                    ################################################################
+
+                    "last_position": observed[-1].copy(),
+
+                    "last_heading": float(
+                        headings[-1]
+                    ),
                 }
+            )
+
+        #######################################################################
+        # Validate agent collection
+        #######################################################################
+
+        if not processed_agents:
+
+            raise ValueError(
+                "No agents contain the complete configured "
+                "observation history."
             )
 
         return processed_agents
 
-        ###########################################################################
-    # Lane Processing
+    ###########################################################################
+    # Map Processing
     ###########################################################################
 
-    def _process_lanes(
+    def _process_maps(
         self,
         scene: RawScene,
         origin: np.ndarray,
         heading: float,
     ) -> list[dict[str, Any]]:
         """
-        Normalize and sample lane centerlines.
+        Normalize and sample map centerlines.
 
-        Returns
-        -------
-        list[dict]
-            Processed lane representations.
+        The resulting map representations are expressed in the
+        target-agent local reference frame.
         """
 
-        processed_lanes: list[dict[str, Any]] = []
+        processed_maps: list[
+            dict[str, Any]
+        ] = []
+
+        #######################################################################
+        # Iterate over lanes
+        #######################################################################
 
         for lane in scene.lanes.values():
+
+            ###################################################################
+            # Normalize centerline
+            ###################################################################
 
             centerline = transform_points(
                 lane.centerline,
@@ -214,20 +534,30 @@ class ScenePreprocessor:
                 heading,
             )
 
+            ###################################################################
+            # Uniform sampling
+            ###################################################################
+
             centerline = sample_centerline(
                 centerline,
-                self.lane_sample_points,
+                self.map_sample_points,
+            ).astype(
+                np.float32,
             )
+
+            ###################################################################
+            # Unit tangent vectors
+            ###################################################################
 
             direction = np.zeros(
                 (
-                    self.lane_sample_points,
+                    self.map_sample_points,
                     2,
                 ),
                 dtype=np.float32,
             )
 
-            if self.lane_sample_points > 1:
+            if self.map_sample_points > 1:
 
                 delta = (
                     centerline[1:]
@@ -245,30 +575,94 @@ class ScenePreprocessor:
                     1e-8,
                 )
 
-                direction[:-1] = delta / norms
+                direction[:-1] = (
+                    delta / norms
+                )
 
-                direction[-1] = direction[-2]
+                direction[-1] = (
+                    direction[-2]
+                )
 
-            processed_lanes.append(
+            ###################################################################
+            # Lane heading
+            ###################################################################
+
+            if self.map_sample_points > 1:
+
+                lane_heading = float(
+                    np.arctan2(
+                        direction[0, 1],
+                        direction[0, 0],
+                    )
+                )
+
+            else:
+
+                lane_heading = 0.0
+
+            ###################################################################
+            # Processed map representation
+            ###################################################################
+
+            processed_maps.append(
                 {
-                    "lane_id": lane.lane_id,
+                    "lane_id": int(
+                        lane.lane_id
+                    ),
+
                     "centerline": centerline,
-                    "centroid": centerline.mean(axis=0),
+
+                    "centroid": centerline.mean(
+                        axis=0
+                    ).astype(
+                        np.float32,
+                    ),
+
                     "direction": direction,
-                    "is_intersection": lane.is_intersection,
-                    "turn_direction": lane.turn_direction,
-                    "has_traffic_control": lane.has_traffic_control,
+
+                    "heading": lane_heading,
+
+                    "is_intersection": (
+                        lane.is_intersection
+                    ),
+
+                    "turn_direction": (
+                        lane.turn_direction
+                    ),
+
+                    "has_traffic_control": (
+                        lane.has_traffic_control
+                    ),
                 }
             )
 
-        return processed_lanes
+        return processed_maps
+
+    ###########################################################################
+    # Callable Interface
+    ###########################################################################
 
     def __call__(
         self,
         scene: RawScene,
     ) -> SceneData:
         """
-        Allow ScenePreprocessor(scene) syntax.
-        """
-        return self.preprocess(scene)
+        Allow:
 
+            preprocessor(scene)
+
+        syntax.
+        """
+
+        return self.preprocess(
+            scene,
+        )
+
+
+###############################################################################
+# Public Exports
+###############################################################################
+
+__all__ = [
+    "ScenePreprocessor",
+]

@@ -1,104 +1,119 @@
 """
 models.attention.tri_atm
 
-Tri-Attention Module (Tri-ATM)
+Tri-Attention Spatio-temporal Module (Tri-ATM).
 
 DSTNet
+------
 Section III-D
 
 Pipeline
 
-Agent Features
-Lane Features
-        │
-        ▼
+Z_scene
+   ↓
 MSPA
-        │
-        ▼
+   ↓
+Z^S
+   ↓
 MHCA
-        │
-        ▼
+   ↓
+Z^ST
+   ↓
 MMIA
-        │
-        ▼
-Updated Features
+   ↓
+Z^STM
 """
 
 from __future__ import annotations
 
+import torch
 from torch import Tensor, nn
 
 from models.attention.mspa import MSPA
 from models.attention.mhca import MHCA
 from models.attention.mmia import MMIA
 
-from typing import Any
-
 
 class TriATM(nn.Module):
     """
-    Tri-Attention Module.
+    Tri-Attention Spatio-temporal Module.
 
-    Sequentially applies
+    The three attention mechanisms operate on different
+    dimensions of the scene representation:
 
-        1. Multi-head Spatial Pattern Attention (MSPA)
+        MSPA
+            agent dimension
 
-        2. Multi-head Historical Context Attention (MHCA)
+        MHCA
+            historical timestep dimension
 
-        3. Multi-modal Interaction Attention (MMIA)
+        MMIA
+            prediction-mode dimension
     """
 
     def __init__(
         self,
         hidden_dim: int,
         num_heads: int,
+        interaction_radius: float,
         window_sizes: tuple[int, ...] = (
             2,
             4,
             8,
         ),
-        expansion: int = 4,
         dropout: float = 0.1,
     ) -> None:
 
         super().__init__()
 
+        self.hidden_dim = int(
+            hidden_dim
+        )
+
+        self.num_heads = int(
+            num_heads
+        )
+
+        self.interaction_radius = float(
+            interaction_radius
+        )
+
+        self.window_sizes = tuple(
+            int(size)
+            for size in window_sizes
+        )
+
         #######################################################################
-        # Spatial Pattern Attention
+        # MSPA
         #######################################################################
 
         self.mspa = MSPA(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
-            expansion=expansion,
+            interaction_radius=interaction_radius,
             dropout=dropout,
         )
 
         #######################################################################
-        # Historical Context Attention
+        # MHCA
         #######################################################################
 
         self.mhca = MHCA(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             window_sizes=window_sizes,
-            expansion=expansion,
             dropout=dropout,
         )
 
         #######################################################################
-        # Multi-modal Interaction Attention
+        # MMIA
         #######################################################################
 
         self.mmia = MMIA(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
-            expansion=expansion,
             dropout=dropout,
         )
-
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
 
     ###########################################################################
     # Forward
@@ -106,99 +121,142 @@ class TriATM(nn.Module):
 
     def forward(
         self,
+        scene_embeddings: Tensor,
+        positions: Tensor,
         *,
-        agent_features: Tensor,
-        lane_features: Tensor,
-        graph: Any | None = None,
         agent_mask: Tensor | None = None,
-        lane_mask: Tensor | None = None,
-    ) -> tuple[
-        Tensor,
-        Tensor,
-    ]:
+    ) -> Tensor:
         """
+        Apply Tri-ATM.
+
         Parameters
         ----------
-        agent_features
-            Shape (B,N,C)
+        scene_embeddings
+            Z_scene
 
-        lane_features
-            Shape (B,L,C)
+            Shape:
+
+                (B,N,H,K,D)
+
+        positions
+            Current agent positions.
+
+            Shape:
+
+                (B,N,2)
+
+        agent_mask
+            Valid-agent mask.
+
+            Shape:
+
+                (B,N)
 
         Returns
         -------
-        Updated
+        Z^STM
 
-            agent_features
+            Shape:
 
-            lane_features
+                (B,N,H,K,D)
         """
 
         #######################################################################
-        # MSPA
+        # Input validation
         #######################################################################
 
-        agent_features = self.mspa(
-            features=agent_features,
-            graph=graph,
+        if scene_embeddings.ndim != 5:
+            raise ValueError(
+                "scene_embeddings must have shape "
+                "(B,N,H,K,D)."
+            )
+
+        B, N, H, K_modes, D = (
+            scene_embeddings.shape
         )
 
-        #######################################################################
-        # MHCA
-        #######################################################################
-        #
-        # MHCA operates on temporal features.
-        # If temporal dimension already exists:
-        #
-        #     (B,N,T,C)
-        #
-        # it can be passed directly.
-        #
-        # Otherwise temporarily insert a singleton
-        # temporal dimension.
-        #######################################################################
-
-        if agent_features.ndim == 3:
-
-            temporal = agent_features.unsqueeze(2)
-
-            temporal = self.mhca(
-                temporal,
+        if D != self.hidden_dim:
+            raise ValueError(
+                f"Expected hidden_dim={self.hidden_dim}, got {D}."
             )
 
-            agent_features = temporal.squeeze(2)
-
-        else:
-
-            agent_features = self.mhca(
-                agent_features,
+        if positions.shape != (
+            B,
+            N,
+            2,
+        ):
+            raise ValueError(
+                "positions must have shape (B,N,2)."
             )
 
+        if agent_mask is not None:
+
+            if agent_mask.shape != (
+                B,
+                N,
+            ):
+                raise ValueError(
+                    "agent_mask must have shape (B,N)."
+                )
+
         #######################################################################
-        # MMIA
+        # 1. MSPA
+        #
+        # Z_scene → Z^S
         #######################################################################
 
-        agent_features, lane_features = self.mmia(
-            agent_features=agent_features,
-            lane_features=lane_features,
+        spatial_embeddings = self.mspa(
+            scene_embeddings,
+            positions,
             agent_mask=agent_mask,
-            lane_mask=lane_mask,
         )
 
-        return (
-            agent_features,
-            lane_features,
+        if spatial_embeddings.shape != scene_embeddings.shape:
+            raise RuntimeError(
+                "MSPA changed the scene representation shape."
+            )
+
+        #######################################################################
+        # 2. MHCA
+        #
+        # Z^S → Z^ST
+        #######################################################################
+
+        spatio_temporal_embeddings = self.mhca(
+            spatial_embeddings,
+            agent_mask=agent_mask,
         )
 
-    ###########################################################################
-    # Representation
-    ###########################################################################
+        if spatio_temporal_embeddings.shape != scene_embeddings.shape:
+            raise RuntimeError(
+                "MHCA changed the scene representation shape."
+            )
 
-    def extra_repr(
-        self,
-    ) -> str:
+        #######################################################################
+        # 3. MMIA
+        #
+        # Z^ST → Z^STM
+        #######################################################################
+
+        multi_mode_embeddings = self.mmia(
+            spatio_temporal_embeddings,
+        )
+
+        if multi_mode_embeddings.shape != scene_embeddings.shape:
+            raise RuntimeError(
+                "MMIA changed the scene representation shape."
+            )
+
+        return multi_mode_embeddings
+
+    def extra_repr(self) -> str:
 
         return (
             f"hidden_dim={self.hidden_dim}, "
-            f"num_heads={self.num_heads}"
+            f"num_heads={self.num_heads}, "
+            f"interaction_radius={self.interaction_radius}, "
+            f"window_sizes={self.window_sizes}"
         )
+
+
+__all__ = ["TriATM"]

@@ -1,41 +1,66 @@
 """
 models.encoders.agent_encoder
 
-Agent trajectory encoder for DSTNet.
+Agent Encoder for DSTNet.
 
-This module projects an observed trajectory into the latent
-feature space using the two-layer MLP described in the paper.
+The Agent Encoder independently projects every observed agent state
+into the hidden feature space while preserving the temporal dimension.
 
 Input
 -----
-(B, N, T_obs, 2)
+Ea_input ∈ R^(B × N × H × 2)
 
 Output
 ------
-(B, N, hidden_dim)
+Ea ∈ R^(B × N × H × D)
+
+where
+
+    B : batch size
+    N : number of agents
+    H : observation history length
+    D : hidden feature dimension
 """
 
 from __future__ import annotations
-from models.layers.mlp import MLP
 
 import torch
 from torch import nn
 
 
+###############################################################################
+# Agent Encoder
+###############################################################################
+
+
 class AgentEncoder(nn.Module):
     """
-    Encode observed agent trajectories.
+    Encode observed agent states independently.
 
-    Parameters
-    ----------
-    observation_steps
-        Number of observed frames.
+    The same encoder weights are applied to every agent and every
+    historical timestep.
 
-    hidden_dim
-        Output feature dimension.
+    Architecture
+    ------------
 
-    dropout
-        Dropout probability.
+        (x, y)
+           │
+           ▼
+        Linear
+           │
+           ▼
+       LayerNorm
+           │
+           ▼
+         GELU
+           │
+           ▼
+        Linear
+           │
+           ▼
+          D
+
+    The temporal dimension is never pooled or collapsed.
     """
 
     def __init__(
@@ -49,13 +74,46 @@ class AgentEncoder(nn.Module):
 
         self._observation_steps = observation_steps
         self._hidden_dim = hidden_dim
-        self._input_dim = observation_steps * 2
+        self._input_dim = 2
 
-        self.encoder = MLP(
-            input_dim=self._input_dim,
-            hidden_dims=[hidden_dim],
-            output_dim=hidden_dim,
-            dropout=dropout,
+        #######################################################################
+        # State projection
+        #######################################################################
+
+        self.input_projection = nn.Linear(
+            self._input_dim,
+            hidden_dim,
+        )
+
+        #######################################################################
+        # Normalization
+        #######################################################################
+
+        self.norm = nn.LayerNorm(
+            hidden_dim,
+        )
+
+        #######################################################################
+        # Non-linearity
+        #######################################################################
+
+        self.activation = nn.GELU()
+
+        #######################################################################
+        # Output projection
+        #######################################################################
+
+        self.output_projection = nn.Linear(
+            hidden_dim,
+            hidden_dim,
+        )
+
+        #######################################################################
+        # Dropout
+        #######################################################################
+
+        self.dropout = nn.Dropout(
+            dropout,
         )
 
     ###########################################################################
@@ -70,6 +128,10 @@ class AgentEncoder(nn.Module):
     def hidden_dim(self) -> int:
         return self._hidden_dim
 
+    @property
+    def input_dim(self) -> int:
+        return self._input_dim
+
     ###########################################################################
     # Encoding
     ###########################################################################
@@ -79,44 +141,114 @@ class AgentEncoder(nn.Module):
         trajectories: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Encode observed trajectories.
+        Encode observed agent trajectories.
 
         Parameters
         ----------
         trajectories
-            Shape (B, N, T_obs, 2)
+            Observed agent positions.
+
+            Shape:
+
+                (B, N, H, 2)
 
         Returns
         -------
         torch.Tensor
-            Shape (B, N, hidden_dim)
+
+            Agent embeddings Ea.
+
+            Shape:
+
+                (B, N, H, D)
         """
 
+        #######################################################################
+        # Validate rank
+        #######################################################################
+
         if trajectories.ndim != 4:
+
             raise ValueError(
-                "Expected shape (B,N,T,2)."
+                "Expected trajectories with shape "
+                "(B,N,H,2)."
             )
 
-        batch_size, num_agents, steps, dims = trajectories.shape
-
-        if steps != self._observation_steps:
-            raise ValueError(
-                f"Expected {self._observation_steps} "
-                f"observation steps, got {steps}."
-            )
-
-        if dims != 2:
-            raise ValueError(
-                "Last dimension must be 2."
-            )
-
-        x = trajectories.reshape(
-            batch_size,
-            num_agents,
-            self._input_dim,
+        batch_size, num_agents, history_steps, dimensions = (
+            trajectories.shape
         )
 
-        return self.encoder(x)
+        #######################################################################
+        # Validate temporal dimension
+        #######################################################################
+
+        if history_steps != self._observation_steps:
+
+            raise ValueError(
+                f"Expected {self._observation_steps} observation "
+                f"steps, got {history_steps}."
+            )
+
+        #######################################################################
+        # Validate coordinate dimension
+        #######################################################################
+
+        if dimensions != self._input_dim:
+
+            raise ValueError(
+                "The final trajectory dimension must be 2 "
+                "(x,y)."
+            )
+
+        #######################################################################
+        # Each state is encoded independently.
+        #
+        # nn.Linear operates only on the final dimension:
+        #
+        #     (B,N,H,2)
+        #          ↓
+        #     (B,N,H,D)
+        #
+        # Therefore no explicit flattening is necessary.
+        #######################################################################
+
+        x = self.input_projection(
+            trajectories,
+        )
+
+        #######################################################################
+        # LayerNorm
+        #######################################################################
+
+        x = self.norm(
+            x,
+        )
+
+        #######################################################################
+        # GELU
+        #######################################################################
+
+        x = self.activation(
+            x,
+        )
+
+        #######################################################################
+        # Output projection
+        #######################################################################
+
+        x = self.output_projection(
+            x,
+        )
+
+        #######################################################################
+        # Dropout
+        #######################################################################
+
+        x = self.dropout(
+            x,
+        )
+
+        return x
 
     ###########################################################################
     # Forward
@@ -128,6 +260,14 @@ class AgentEncoder(nn.Module):
     ) -> torch.Tensor:
         """
         Forward pass.
+
+        Returns
+        -------
+        Ea
+
+            Shape:
+
+                (B,N,H,D)
         """
 
         return self.encode(
@@ -138,7 +278,9 @@ class AgentEncoder(nn.Module):
     # Representation
     ###########################################################################
 
-    def __repr__(self) -> str:
+    def __repr__(
+        self,
+    ) -> str:
 
         return (
             "AgentEncoder("
@@ -147,3 +289,10 @@ class AgentEncoder(nn.Module):
         )
 
 
+###############################################################################
+# Public API
+###############################################################################
+
+__all__ = [
+    "AgentEncoder",
+]

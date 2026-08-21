@@ -431,6 +431,81 @@ def _build_config(
 
     return cfg
 
+###############################################################################
+# Runtime Helpers
+###############################################################################
+
+
+def resolve_device(
+    cfg: ConfigNode,
+) -> str:
+    """
+    Resolve the configured runtime device.
+
+    Supported values
+    ----------------
+    auto
+        Use CUDA when available, otherwise CPU.
+
+    cpu
+        Force CPU.
+
+    cuda
+        Require CUDA.
+    """
+
+    import torch
+
+    configured = str(
+        cfg.runtime.device
+    ).strip().lower()
+
+    if configured == "auto":
+
+        return (
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
+
+    if configured == "cuda":
+
+        if not torch.cuda.is_available():
+
+            raise RuntimeError(
+                "runtime.device='cuda' was requested, "
+                "but CUDA is not available."
+            )
+
+        return "cuda"
+
+    if configured == "cpu":
+
+        return "cpu"
+
+    raise ValueError(
+        "Unsupported runtime.device "
+        f"'{cfg.runtime.device}'. "
+        "Expected 'auto', 'cpu', or 'cuda'."
+    )
+
+
+def resolve_path(
+    path: str | Path,
+) -> Path:
+    """
+    Resolve a repository-relative configuration path.
+
+    Absolute paths are returned unchanged.
+    Relative paths are resolved against the repository root.
+    """
+
+    candidate = Path(path)
+
+    if candidate.is_absolute():
+        return candidate
+
+    return PROJECT_ROOT / candidate
 
 ###############################################################################
 # Cached Loaders
@@ -732,6 +807,8 @@ __all__ = [
     "load_local_cpu_config",
     "reload_config",
     "reload_all",
+    "resolve_device",
+    "resolve_path",
     "get_config",
     "get_paper_config",
     "get_debug_config",
