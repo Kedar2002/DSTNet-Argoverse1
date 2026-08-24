@@ -39,11 +39,34 @@ Tensor convention
 -----------------
 
 B : batch size
-N : number of agents
+N : padded maximum number of agents
 H : observation history length
-M : number of map nodes
+M : padded maximum number of map nodes
 K : number of prediction modes
 D : hidden dimension
+
+Per-scene quantities
+--------------------
+
+For scene b:
+
+    N_b = actual number of agents
+    M_b = actual number of map nodes
+
+The SceneGraph contains:
+
+    N_b * H agent-state nodes
+    M_b map nodes
+
+while the collated tensors contain:
+
+    N_max agents
+    M_max map nodes
+
+Padding is therefore handled explicitly using:
+
+    agent_mask : (B,N_max)
+    map_mask   : (B,M_max)
 
 Input
 -----
@@ -65,6 +88,7 @@ Z_scene
 
 Important
 ---------
+
 The paper specifies the GSTA computation flow and attention
 equations, but does not explicitly specify the exact operation
 used to convert edge-indexed Er into node-associated temporal
@@ -72,8 +96,28 @@ and spatial features.
 
 This implementation therefore uses mean aggregation of incident
 edge embeddings onto graph nodes before the attention stages.
+
 That is an implementation detail, not a claim that the paper
 explicitly specifies mean aggregation.
+
+Batching note
+-------------
+
+The SceneGraph stores only actual scene nodes, whereas DataLoader
+collation pads Ea and Em to the largest scene in the batch.
+
+Therefore:
+
+    Ea.shape[1] == max(N_b)
+    Em.shape[1] == max(M_b)
+
+but for an individual scene:
+
+    graph.num_agent_states == N_b * H
+    graph.num_map_nodes == M_b
+
+This implementation preserves that distinction and never creates
+artificial graph nodes for padded agents or map elements.
 """
 
 from __future__ import annotations
@@ -379,12 +423,16 @@ class GSTA(nn.Module):
 
                 (B,N,H,D)
 
+            N is the padded maximum number of agents in the batch.
+
         Em
             Map embeddings.
 
             Shape:
 
                 (B,M,D)
+
+            M is the padded maximum number of map nodes in the batch.
 
         Er
             Relative spatio-temporal embeddings.
@@ -399,10 +447,14 @@ class GSTA(nn.Module):
 
                 (B,N)
 
+            True for valid agents and False for padding.
+
         map_mask
             Shape:
 
                 (B,M)
+
+            True for valid map nodes and False for padding.
 
         Returns
         -------
@@ -442,6 +494,29 @@ class GSTA(nn.Module):
         )
 
         #######################################################################
+        # Build masks from the actual SceneGraph sizes.
+        #
+        # This is important because DataLoader collation pads the tensors
+        # to batch maxima while each SceneGraph contains only real nodes.
+        #######################################################################
+
+        effective_agent_mask = (
+            self._build_graph_agent_mask(
+                Ea=Ea,
+                scene_graphs=graphs,
+                supplied_mask=agent_mask,
+            )
+        )
+
+        effective_map_mask = (
+            self._build_graph_map_mask(
+                Em=Em,
+                scene_graphs=graphs,
+                supplied_mask=map_mask,
+            )
+        )
+
+        #######################################################################
         # Build Z_i^T and Z_j^S
         #######################################################################
 
@@ -463,7 +538,7 @@ class GSTA(nn.Module):
         temporal_features = (
             self._temporal_self_attention(
                 temporal_features,
-                agent_mask=agent_mask,
+                agent_mask=effective_agent_mask,
             )
         )
 
@@ -476,7 +551,7 @@ class GSTA(nn.Module):
         spatial_features = (
             self._spatial_self_attention(
                 spatial_features,
-                map_mask=map_mask,
+                map_mask=effective_map_mask,
             )
         )
 
@@ -490,7 +565,7 @@ class GSTA(nn.Module):
             self._temporal_to_spatial_attention(
                 temporal_features,
                 spatial_features,
-                map_mask=map_mask,
+                map_mask=effective_map_mask,
             )
         )
 
@@ -504,7 +579,7 @@ class GSTA(nn.Module):
             self._spatial_to_temporal_attention(
                 spatial_features,
                 temporal_features,
-                agent_mask=agent_mask,
+                agent_mask=effective_agent_mask,
             )
         )
 
@@ -517,7 +592,7 @@ class GSTA(nn.Module):
         temporal_scene = (
             self._temporal_query_attention(
                 temporal_features,
-                agent_mask=agent_mask,
+                agent_mask=effective_agent_mask,
             )
         )
 
@@ -531,7 +606,7 @@ class GSTA(nn.Module):
             self._spatial_query_attention(
                 spatial_features,
                 num_agents=Ea.shape[1],
-                map_mask=map_mask,
+                map_mask=effective_map_mask,
             )
         )
 
@@ -546,11 +621,204 @@ class GSTA(nn.Module):
             + spatial_scene
         )
 
+        #######################################################################
+        # Keep padded agents explicitly zero.
+        #
+        # This prevents artificial representations from padded agents from
+        # propagating into downstream prediction heads.
+        #######################################################################
+
+        if effective_agent_mask is not None:
+
+            Z_scene = (
+                Z_scene
+                * effective_agent_mask[
+                    ...,
+                    None,
+                    None,
+                    None,
+                ].to(
+                    dtype=Z_scene.dtype,
+                    device=Z_scene.device,
+                )
+            )
+
         self._scene_prediction_embeddings = (
             Z_scene
         )
 
         return Z_scene
+
+    ###########################################################################
+    # Graph-derived Masks
+    ###########################################################################
+
+    def _build_graph_agent_mask(
+        self,
+        *,
+        Ea: Tensor,
+        scene_graphs: Sequence[SceneGraph],
+        supplied_mask: Tensor | None,
+    ) -> Tensor:
+        """
+        Construct a valid-agent mask from SceneGraph sizes.
+
+        For scene b:
+
+            graph.num_agent_states = N_b * H
+
+        Therefore:
+
+            N_b = graph.num_agent_states / H
+
+        The returned mask has shape:
+
+            (B,N_max)
+        """
+
+        batch_size = Ea.shape[0]
+        num_agents = Ea.shape[1]
+
+        mask = torch.zeros(
+            (
+                batch_size,
+                num_agents,
+            ),
+            dtype=torch.bool,
+            device=Ea.device,
+        )
+
+        for batch_index, graph in enumerate(
+            scene_graphs
+        ):
+
+            state_count = int(
+                graph.num_agent_states
+            )
+
+            if state_count % self.observation_steps != 0:
+
+                raise ValueError(
+                    "SceneGraph agent-state count must be "
+                    "divisible by observation_steps: "
+                    f"states={state_count}, "
+                    f"observation_steps="
+                    f"{self.observation_steps}."
+                )
+
+            actual_agents = (
+                state_count
+                // self.observation_steps
+            )
+
+            if actual_agents > num_agents:
+
+                raise ValueError(
+                    "SceneGraph contains more agents than "
+                    "the padded Ea tensor: "
+                    f"graph={actual_agents}, "
+                    f"Ea={num_agents}."
+                )
+
+            mask[
+                batch_index,
+                :actual_agents,
+            ] = True
+
+        #######################################################################
+        # If a caller supplied a mask, require it to agree with the graph.
+        #######################################################################
+
+        if supplied_mask is not None:
+
+            supplied = supplied_mask.to(
+                device=Ea.device,
+                dtype=torch.bool,
+            )
+
+            if not torch.equal(
+                supplied,
+                mask,
+            ):
+
+                raise ValueError(
+                    "agent_mask does not match the "
+                    "agent counts represented by SceneGraph."
+                )
+
+        return mask
+
+    def _build_graph_map_mask(
+        self,
+        *,
+        Em: Tensor,
+        scene_graphs: Sequence[SceneGraph],
+        supplied_mask: Tensor | None,
+    ) -> Tensor:
+        """
+        Construct a valid-map-node mask from SceneGraph sizes.
+
+        The returned mask has shape:
+
+            (B,M_max)
+        """
+
+        batch_size = Em.shape[0]
+        num_maps = Em.shape[1]
+
+        mask = torch.zeros(
+            (
+                batch_size,
+                num_maps,
+            ),
+            dtype=torch.bool,
+            device=Em.device,
+        )
+
+        for batch_index, graph in enumerate(
+            scene_graphs
+        ):
+
+            actual_maps = int(
+                graph.num_map_nodes
+            )
+
+            if actual_maps > num_maps:
+
+                raise ValueError(
+                    "SceneGraph contains more map nodes "
+                    "than the padded Em tensor: "
+                    f"graph={actual_maps}, "
+                    f"Em={num_maps}."
+                )
+
+            mask[
+                batch_index,
+                :actual_maps,
+            ] = True
+
+        #######################################################################
+        # If a caller supplied a mask, require it to agree with the graph.
+        #######################################################################
+
+        if supplied_mask is not None:
+
+            supplied = supplied_mask.to(
+                device=Em.device,
+                dtype=torch.bool,
+            )
+
+            if not torch.equal(
+                supplied,
+                mask,
+            ):
+
+                raise ValueError(
+                    "map_mask does not match the map-node "
+                    "counts represented by SceneGraph."
+                )
+
+        return mask
 
     ###########################################################################
     # Build GSTA Inputs
@@ -581,7 +849,7 @@ class GSTA(nn.Module):
 
         Shape:
 
-            (B,N,H,D)
+            (B,N_max,H,D)
 
         Spatial stream
         --------------
@@ -590,7 +858,7 @@ class GSTA(nn.Module):
 
         Shape:
 
-            (B,M,D)
+            (B,M_max,D)
 
         Implementation note
         -------------------
@@ -599,18 +867,59 @@ class GSTA(nn.Module):
         edge-to-node aggregation operator.
 
         We use mean aggregation over incident edges.
+
+        Important batching behavior
+        ----------------------------
+
+        Ea and Em may contain padded agents/map nodes.
+
+        SceneGraph, however, contains only actual nodes.
+
+        Therefore this method operates on:
+
+            N_b * H
+
+        actual agent states and:
+
+            M_b
+
+        actual map nodes for each scene separately.
         """
 
-        batch_size, num_agents, num_steps, hidden_dim = (
-            Ea.shape
-        )
+        (
+            batch_size,
+            padded_num_agents,
+            num_steps,
+            hidden_dim,
+        ) = Ea.shape
 
-        num_maps = Em.shape[1]
+        padded_num_maps = Em.shape[1]
 
-        expected_states = (
-            num_agents
-            * num_steps
-        )
+        if len(Er) != batch_size:
+
+            raise ValueError(
+                "Er sequence length must match batch size."
+            )
+
+        if len(scene_graphs) != batch_size:
+
+            raise ValueError(
+                "scene_graph sequence length must match "
+                "batch size."
+            )
+
+        if num_steps != self.observation_steps:
+
+            raise ValueError(
+                "Ea temporal dimension does not match "
+                f"observation_steps={self.observation_steps}."
+            )
+
+        #######################################################################
+        # Start with the padded tensors.
+        #
+        # Only valid portions will receive relation aggregation.
+        #######################################################################
 
         temporal_features = Ea.clone()
 
@@ -631,26 +940,56 @@ class GSTA(nn.Module):
             graph.validate()
 
             ###################################################################
-            # Graph / tensor consistency
+            # Determine actual per-scene dimensions.
             ###################################################################
 
-            if graph.num_agent_states != expected_states:
+            state_count = int(
+                graph.num_agent_states
+            )
+
+            if state_count % num_steps != 0:
 
                 raise ValueError(
-                    "SceneGraph agent-state count does not match "
-                    "Ea temporal dimensions: "
-                    f"graph={graph.num_agent_states}, "
-                    f"expected={expected_states}."
+                    "SceneGraph agent-state count must be "
+                    "divisible by the temporal dimension: "
+                    f"graph={state_count}, "
+                    f"steps={num_steps}."
                 )
 
-            if graph.num_map_nodes != num_maps:
+            actual_num_agents = (
+                state_count
+                // num_steps
+            )
+
+            actual_num_maps = int(
+                graph.num_map_nodes
+            )
+
+            ###################################################################
+            # Validate against padded tensors.
+            ###################################################################
+
+            if actual_num_agents > padded_num_agents:
 
                 raise ValueError(
-                    "SceneGraph map-node count does not match "
-                    "Em: "
-                    f"graph={graph.num_map_nodes}, "
-                    f"model={num_maps}."
+                    "SceneGraph agent count exceeds padded "
+                    "Ea dimension: "
+                    f"graph={actual_num_agents}, "
+                    f"Ea={padded_num_agents}."
                 )
+
+            if actual_num_maps > padded_num_maps:
+
+                raise ValueError(
+                    "SceneGraph map count exceeds padded "
+                    "Em dimension: "
+                    f"graph={actual_num_maps}, "
+                    f"Em={padded_num_maps}."
+                )
+
+            ###################################################################
+            # Relation embedding validation.
+            ###################################################################
 
             if relative.edge_index.ndim != 2:
 
@@ -697,10 +1036,11 @@ class GSTA(nn.Module):
                     )
 
             ###################################################################
-            # No edges
+            # No edges.
             ###################################################################
 
             if relative.embeddings.shape[0] == 0:
+
                 continue
 
             ###################################################################
@@ -726,30 +1066,26 @@ class GSTA(nn.Module):
             #
             # Agent states:
             #
-            #     [0, Ns)
+            #     [0, state_count)
             #
             # Map nodes:
             #
-            #     [Ns, Ns+M)
+            #     [state_count, state_count + actual_num_maps)
             ###################################################################
-
-            state_count = (
-                graph.num_agent_states
-            )
 
             map_offset = state_count
 
             source = edge_index[0]
             target = edge_index[1]
 
-            ###################################################################
-            # Validate edge bounds
-            ###################################################################
-
             total_nodes = (
                 state_count
-                + graph.num_map_nodes
+                + actual_num_maps
             )
+
+            ###################################################################
+            # Validate edge bounds.
+            ###################################################################
 
             if edge_index.numel():
 
@@ -769,7 +1105,7 @@ class GSTA(nn.Module):
                     )
 
             ###################################################################
-            # Aggregate relation embeddings onto agent states
+            # Aggregate relation embeddings onto agent states.
             ###################################################################
 
             state_relation_sum = torch.zeros(
@@ -791,7 +1127,7 @@ class GSTA(nn.Module):
             )
 
             ###################################################################
-            # Source state endpoints
+            # Source state endpoints.
             ###################################################################
 
             source_state = (
@@ -832,7 +1168,7 @@ class GSTA(nn.Module):
                 )
 
             ###################################################################
-            # Target state endpoints
+            # Target state endpoints.
             ###################################################################
 
             target_state = (
@@ -873,7 +1209,7 @@ class GSTA(nn.Module):
                 )
 
             ###################################################################
-            # Mean aggregation
+            # Mean aggregation.
             ###################################################################
 
             state_relation_mean = (
@@ -885,12 +1221,19 @@ class GSTA(nn.Module):
             )
 
             ###################################################################
-            # Add relation information to Ea
+            # Add relation information to the valid portion of Ea.
+            #
+            # IMPORTANT:
+            #
+            # Only actual agents are reshaped here.
+            #
+            # We never reshape padded N_max agents into the SceneGraph.
             ###################################################################
 
-            state_features = (
+            valid_agent_features = (
                 Ea[
-                    batch_index
+                    batch_index,
+                    :actual_num_agents,
                 ]
                 .reshape(
                     state_count,
@@ -898,26 +1241,27 @@ class GSTA(nn.Module):
                 )
             )
 
-            state_features = (
-                state_features
+            valid_agent_features = (
+                valid_agent_features
                 + state_relation_mean
             )
 
             temporal_features[
-                batch_index
-            ] = state_features.reshape(
-                num_agents,
+                batch_index,
+                :actual_num_agents,
+            ] = valid_agent_features.reshape(
+                actual_num_agents,
                 num_steps,
                 hidden_dim,
             )
 
             ###################################################################
-            # Aggregate relation embeddings onto map nodes
+            # Aggregate relation embeddings onto map nodes.
             ###################################################################
 
             map_relation_sum = torch.zeros(
                 (
-                    num_maps,
+                    actual_num_maps,
                     hidden_dim,
                 ),
                 dtype=Ea.dtype,
@@ -926,7 +1270,7 @@ class GSTA(nn.Module):
 
             map_relation_count = torch.zeros(
                 (
-                    num_maps,
+                    actual_num_maps,
                     1,
                 ),
                 dtype=Ea.dtype,
@@ -934,7 +1278,7 @@ class GSTA(nn.Module):
             )
 
             ###################################################################
-            # Source map endpoints
+            # Source map endpoints.
             ###################################################################
 
             source_map = (
@@ -978,7 +1322,7 @@ class GSTA(nn.Module):
                 )
 
             ###################################################################
-            # Target map endpoints
+            # Target map endpoints.
             ###################################################################
 
             target_map = (
@@ -1022,7 +1366,7 @@ class GSTA(nn.Module):
                 )
 
             ###################################################################
-            # Mean aggregation
+            # Mean aggregation.
             ###################################################################
 
             map_relation_mean = (
@@ -1034,14 +1378,16 @@ class GSTA(nn.Module):
             )
 
             ###################################################################
-            # Add relation information to Em
+            # Add relation information only to valid map nodes.
             ###################################################################
 
             spatial_features[
-                batch_index
+                batch_index,
+                :actual_num_maps,
             ] = (
                 Em[
-                    batch_index
+                    batch_index,
+                    :actual_num_maps,
                 ]
                 + map_relation_mean
             )
@@ -1078,9 +1424,12 @@ class GSTA(nn.Module):
             (B,N,H,D)
         """
 
-        batch_size, num_agents, num_steps, hidden_dim = (
-            features.shape
-        )
+        (
+            batch_size,
+            num_agents,
+            num_steps,
+            hidden_dim,
+        ) = features.shape
 
         x = self.temporal_norm(
             features
@@ -1237,9 +1586,12 @@ class GSTA(nn.Module):
             (B,N,H,D)
         """
 
-        batch_size, num_agents, num_steps, hidden_dim = (
-            temporal_features.shape
-        )
+        (
+            batch_size,
+            num_agents,
+            num_steps,
+            hidden_dim,
+        ) = temporal_features.shape
 
         query = self.temporal_cross_norm(
             temporal_features
@@ -1319,9 +1671,12 @@ class GSTA(nn.Module):
             (B,M,D)
         """
 
-        batch_size, num_agents, num_steps, hidden_dim = (
-            temporal_features.shape
-        )
+        (
+            batch_size,
+            num_agents,
+            num_steps,
+            hidden_dim,
+        ) = temporal_features.shape
 
         query = self.spatial_cross_norm(
             spatial_features
@@ -1419,9 +1774,12 @@ class GSTA(nn.Module):
             (B,N,H,K,D)
         """
 
-        batch_size, num_agents, num_steps, hidden_dim = (
-            temporal_features.shape
-        )
+        (
+            batch_size,
+            num_agents,
+            num_steps,
+            hidden_dim,
+        ) = temporal_features.shape
 
         if num_steps != self.observation_steps:
 
@@ -1456,7 +1814,7 @@ class GSTA(nn.Module):
         )
 
         #######################################################################
-        # Temporal keys / values
+        # Temporal keys / values.
         #######################################################################
 
         memory = temporal_features.reshape(
@@ -1543,9 +1901,11 @@ class GSTA(nn.Module):
             (B,N,H,K,D)
         """
 
-        batch_size, num_maps, hidden_dim = (
-            spatial_features.shape
-        )
+        (
+            batch_size,
+            num_maps,
+            hidden_dim,
+        ) = spatial_features.shape
 
         #######################################################################
         # Expand learned queries over batch and agents.
@@ -1573,7 +1933,7 @@ class GSTA(nn.Module):
         )
 
         #######################################################################
-        # Map memory
+        # Map memory.
         #######################################################################
 
         memory = spatial_features
