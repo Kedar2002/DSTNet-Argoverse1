@@ -16,12 +16,11 @@ Current DSTNet contract
 Model input:
 
     agent_trajectories : (B,N,H,2)
-    lane_centerlines   : (B,M,P,2)
+    map_centerlines   : (B,M,P,2)
     positions          : (B,N,2)
-    headings           : (B,N)
     graph              : list[SceneGraph]
     agent_mask         : (B,N)
-    lane_mask          : (B,M)
+    map_mask          : (B,M)
 
 Model output:
 
@@ -192,9 +191,8 @@ class Evaluator:
 
         required_keys = {
             "agent_trajectories",
-            "lane_centerlines",
+            "map_centerlines",
             "positions",
-            "headings",
             "graph",
             "future_trajectories",
         }
@@ -244,14 +242,11 @@ class Evaluator:
                     agent_trajectories=batch[
                         "agent_trajectories"
                     ],
-                    lane_centerlines=batch[
-                        "lane_centerlines"
+                    map_centerlines=batch[
+                        "map_centerlines"
                     ],
                     positions=batch[
                         "positions"
-                    ],
-                    headings=batch[
-                        "headings"
                     ],
                     graph=batch[
                         "graph"
@@ -259,8 +254,8 @@ class Evaluator:
                     agent_mask=batch.get(
                         "agent_mask"
                     ),
-                    lane_mask=batch.get(
-                        "lane_mask"
+                    map_mask=batch.get(
+                        "map_mask"
                     ),
                 )
             )

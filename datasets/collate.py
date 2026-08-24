@@ -168,10 +168,10 @@ def _allocate_agent_arrays(
 
 def _allocate_map_arrays(
     batch_size: int,
-    max_lanes: int,
+    max_maps: int,
 ) -> dict[str, np.ndarray]:
     """
-    Allocate lane tensors.
+    Allocate map tensors.
     """
 
     return {
@@ -179,7 +179,7 @@ def _allocate_map_arrays(
         "map_centerlines": np.zeros(
             (
                 batch_size,
-                max_lanes,
+                max_maps,
                 MAP_POINTS,
                 2,
             ),
@@ -189,7 +189,7 @@ def _allocate_map_arrays(
         "map_mask": np.zeros(
             (
                 batch_size,
-                max_lanes,
+                max_maps,
             ),
             dtype=bool,
         ),
@@ -399,7 +399,7 @@ def _collate_agents(
     }
 
 ###############################################################################
-# Lane Collation
+# map Collation
 ###############################################################################
 
 
@@ -407,7 +407,7 @@ def _collate_maps(
     batch: list[SceneData],
 ) -> dict[str, torch.Tensor]:
     """
-    Collate lane centerlines.
+    Collate map centerlines.
 
     Returns
     -------
@@ -419,37 +419,37 @@ def _collate_maps(
 
     batch_size = len(batch)
 
-    max_lanes = max(
+    max_maps = max(
         scene.num_maps
         for scene in batch
     )
 
     arrays = _allocate_map_arrays(
         batch_size=batch_size,
-        max_lanes=max_lanes,
+        max_maps=max_maps,
     )
 
     ###########################################################################
-    # Populate lane tensors
+    # Populate map tensors
     ###########################################################################
 
     for batch_index, scene in enumerate(batch):
 
-        for lane_index, lane in enumerate(scene.maps):
+        for map_index, map in enumerate(scene.maps):
 
             centerline = _pad_sequence(
-                lane["centerline"],
+                map["centerline"],
                 MAP_POINTS,
             )
 
             arrays["map_centerlines"][
                 batch_index,
-                lane_index,
+                map_index,
             ] = centerline
 
             arrays["map_mask"][
                 batch_index,
-                lane_index,
+                map_index,
             ] = True
 
     ###########################################################################

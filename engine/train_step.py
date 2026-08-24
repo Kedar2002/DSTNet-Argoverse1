@@ -21,11 +21,11 @@ Current DSTNet contract
 Model input:
 
     agent_trajectories : (B,N,H,2)
-    lane_centerlines   : (B,M,P,2)
+    map_centerlines   : (B,M,P,2)
     positions          : (B,N,2)
     graph              : list[SceneGraph]
     agent_mask         : (B,N)
-    lane_mask          : (B,M)
+    map_mask          : (B,M)
 
 Dataset batch may additionally contain:
 
@@ -283,8 +283,8 @@ class TrainStep:
 
         while DSTNet.forward() uses:
 
-            lane_centerlines
-            lane_mask
+            map_centerlines
+            map_mask
 
         headings remain available in the batch for preprocessing/
         diagnostics but are not currently part of DSTNet.forward().
@@ -295,7 +295,7 @@ class TrainStep:
                 "agent_trajectories"
             ],
 
-            lane_centerlines=batch[
+            map_centerlines=batch[
                 "map_centerlines"
             ],
 
@@ -311,7 +311,7 @@ class TrainStep:
                 "agent_mask"
             ),
 
-            lane_mask=batch.get(
+            map_mask=batch.get(
                 "map_mask"
             ),
         )

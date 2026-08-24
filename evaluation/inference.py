@@ -64,11 +64,9 @@ class InferenceEngine:
 
             agent_trajectories=batch["agent_trajectories"],
 
-            lane_centerlines=batch["lane_centerlines"],
+            map_centerlines=batch["map_centerlines"],
 
             positions=batch["positions"],
-
-            headings=batch["headings"],
 
             graph=batch["graph"],
 
@@ -76,8 +74,8 @@ class InferenceEngine:
                 "agent_mask",
             ),
 
-            lane_mask=batch.get(
-                "lane_mask",
+            map_mask=batch.get(
+                "map_mask",
             ),
         )
 

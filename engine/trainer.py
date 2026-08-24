@@ -326,9 +326,8 @@ class Trainer:
 
             required = {
                 "agent_trajectories",
-                "lane_centerlines",
+                "map_centerlines",
                 "positions",
-                "headings",
                 "graph",
                 "future_trajectories",
             }
@@ -351,14 +350,11 @@ class Trainer:
                     agent_trajectories=batch[
                         "agent_trajectories"
                     ],
-                    lane_centerlines=batch[
-                        "lane_centerlines"
+                    map_centerlines=batch[
+                        "map_centerlines"
                     ],
                     positions=batch[
                         "positions"
-                    ],
-                    headings=batch[
-                        "headings"
                     ],
                     graph=batch[
                         "graph"
@@ -366,8 +362,8 @@ class Trainer:
                     agent_mask=batch.get(
                         "agent_mask"
                     ),
-                    lane_mask=batch.get(
-                        "lane_mask"
+                    map_mask=batch.get(
+                        "map_mask"
                     ),
                 )
             )

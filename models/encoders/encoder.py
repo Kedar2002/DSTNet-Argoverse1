@@ -288,11 +288,11 @@ class Encoder(nn.Module):
     def _validate_inputs(
         self,
         agent_features: Tensor,
-        lane_features: Tensor,
+        map_features: Tensor,
         positions: Tensor,
         graph: SceneGraph | Sequence[SceneGraph],
         agent_mask: Tensor | None,
-        lane_mask: Tensor | None,
+        map_mask: Tensor | None,
     ) -> None:
         """
         Validate encoder inputs before executing the network.
@@ -333,26 +333,26 @@ class Encoder(nn.Module):
         # Map features
         #######################################################################
 
-        if lane_features.ndim != 3:
+        if map_features.ndim != 3:
 
             raise ValueError(
-                "lane_features must have shape "
+                "map_features must have shape "
                 "(B,M,D)."
             )
 
-        if lane_features.shape[0] != batch_size:
+        if map_features.shape[0] != batch_size:
 
             raise ValueError(
-                "agent_features and lane_features must have "
+                "agent_features and map_features must have "
                 "the same batch size."
             )
 
-        if lane_features.shape[-1] != self.hidden_dim:
+        if map_features.shape[-1] != self.hidden_dim:
 
             raise ValueError(
-                "lane_features hidden dimension mismatch. "
+                "map_features hidden dimension mismatch. "
                 f"Expected {self.hidden_dim}, "
-                f"got {lane_features.shape[-1]}."
+                f"got {map_features.shape[-1]}."
             )
 
         #######################################################################
@@ -402,22 +402,22 @@ class Encoder(nn.Module):
         # Lane mask
         #######################################################################
 
-        if lane_mask is not None:
+        if map_mask is not None:
 
-            if lane_mask.ndim != 2:
+            if map_mask.ndim != 2:
 
                 raise ValueError(
-                    "lane_mask must have shape (B,M)."
+                    "map_mask must have shape (B,M)."
                 )
 
-            if lane_mask.shape != (
+            if map_mask.shape != (
                 batch_size,
-                lane_features.shape[1],
+                map_features.shape[1],
             ):
 
                 raise ValueError(
-                    "lane_mask must have shape "
-                    "(B,M) matching lane_features."
+                    "map_mask must have shape "
+                    "(B,M) matching map_features."
                 )
 
         #######################################################################
@@ -511,12 +511,12 @@ class Encoder(nn.Module):
     def forward(
         self,
         agent_features: Tensor,
-        lane_features: Tensor,
+        map_features: Tensor,
         positions: Tensor,
         graph: SceneGraph | Sequence[SceneGraph],
         *,
         agent_mask: Tensor | None = None,
-        lane_mask: Tensor | None = None,
+        map_mask: Tensor | None = None,
     ) -> Tensor:
         """
         Encode a complete scene.
@@ -530,7 +530,7 @@ class Encoder(nn.Module):
 
                 (B,N,H,D)
 
-        lane_features
+        map_features
             Map embeddings Em.
 
             Shape:
@@ -562,7 +562,7 @@ class Encoder(nn.Module):
 
                 (B,N)
 
-        lane_mask
+        map_mask
             Valid-map mask.
 
             Shape:
@@ -590,11 +590,11 @@ class Encoder(nn.Module):
 
         self._validate_inputs(
             agent_features=agent_features,
-            lane_features=lane_features,
+            map_features=map_features,
             positions=positions,
             graph=graph,
             agent_mask=agent_mask,
-            lane_mask=lane_mask,
+            map_mask=map_mask,
         )
 
         batch_size = agent_features.shape[0]
@@ -629,11 +629,11 @@ class Encoder(nn.Module):
 
         scene_embeddings = self.gsta(
             Ea=agent_features,
-            Em=lane_features,
+            Em=map_features,
             Er=relative,
             scene_graph=graph,
             agent_mask=agent_mask,
-            map_mask=lane_mask,
+            map_mask=map_mask,
         )
 
         #######################################################################

@@ -113,7 +113,7 @@ class DSTNet(nn.Module):
     prediction_steps:
         Number of future trajectory steps.
 
-    lane_points:
+    map_points:
         Number of sampled points used for each lane centerline.
 
     hidden_dim:
@@ -142,7 +142,7 @@ class DSTNet(nn.Module):
         self,
         observation_steps: int = 20,
         prediction_steps: int = 30,
-        lane_points: int = 20,
+        map_points: int = 20,
         hidden_dim: int = 256,
         num_heads: int = 8,
         num_encoder_layers: int = 2,
@@ -168,9 +168,9 @@ class DSTNet(nn.Module):
                 "prediction_steps must be positive."
             )
 
-        if lane_points <= 0:
+        if map_points <= 0:
             raise ValueError(
-                "lane_points must be positive."
+                "map_points must be positive."
             )
 
         if hidden_dim <= 0:
@@ -214,7 +214,7 @@ class DSTNet(nn.Module):
 
         self.observation_steps = observation_steps
         self.prediction_steps = prediction_steps
-        self.lane_points = lane_points
+        self.map_points = map_points
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.num_encoder_layers = num_encoder_layers
@@ -237,8 +237,8 @@ class DSTNet(nn.Module):
         # Local Map Encoder
         #######################################################################
 
-        self.lane_encoder = MapEncoder(
-            num_points=lane_points,
+        self.map_encoder = MapEncoder(
+            num_points=map_points,
             hidden_dim=hidden_dim,
             dropout=dropout,
         )
@@ -302,11 +302,11 @@ class DSTNet(nn.Module):
         self,
         *,
         agent_trajectories: Tensor,
-        lane_centerlines: Tensor,
+        map_centerlines: Tensor,
         positions: Tensor,
         graph: SceneGraph | Sequence[SceneGraph],
         agent_mask: Tensor | None = None,
-        lane_mask: Tensor | None = None,
+        map_mask: Tensor | None = None,
     ) -> tuple[
         Prediction,
         RefinedPrediction,
@@ -323,7 +323,7 @@ class DSTNet(nn.Module):
 
                 (B,N,H,2)
 
-        lane_centerlines:
+        map_centerlines:
             Sampled lane centerlines.
 
             Shape:
@@ -347,7 +347,7 @@ class DSTNet(nn.Module):
 
                 (B,N)
 
-        lane_mask:
+        map_mask:
             Optional validity mask for lanes.
 
             Shape:
@@ -380,11 +380,11 @@ class DSTNet(nn.Module):
             )
 
         if not isinstance(
-            lane_centerlines,
+            map_centerlines,
             Tensor,
         ):
             raise TypeError(
-                "lane_centerlines must be a torch.Tensor."
+                "map_centerlines must be a torch.Tensor."
             )
 
         if not isinstance(
@@ -402,11 +402,11 @@ class DSTNet(nn.Module):
                 f"got {tuple(agent_trajectories.shape)}."
             )
 
-        if lane_centerlines.ndim != 4:
+        if map_centerlines.ndim != 4:
             raise ValueError(
-                "lane_centerlines must have shape "
+                "map_centerlines must have shape "
                 "(B,M,P,2), "
-                f"got {tuple(lane_centerlines.shape)}."
+                f"got {tuple(map_centerlines.shape)}."
             )
 
         if positions.ndim != 3:
@@ -424,8 +424,8 @@ class DSTNet(nn.Module):
             agent_trajectories,
         )
 
-        lane_features = self.lane_encoder(
-            lane_centerlines,
+        map_features = self.map_encoder(
+            map_centerlines,
         )
 
         #######################################################################
@@ -446,11 +446,11 @@ class DSTNet(nn.Module):
 
         z_stm = self.encoder(
             agent_features=agent_features,
-            lane_features=lane_features,
+            map_features=map_features,
             positions=positions,
             graph=graph,
             agent_mask=agent_mask,
-            lane_mask=lane_mask,
+            map_mask=map_mask,
         )
 
         #######################################################################
@@ -571,7 +571,7 @@ class DSTNet(nn.Module):
         return (
             f"observation_steps={self.observation_steps}, "
             f"prediction_steps={self.prediction_steps}, "
-            f"lane_points={self.lane_points}, "
+            f"map_points={self.map_points}, "
             f"hidden_dim={self.hidden_dim}, "
             f"num_heads={self.num_heads}, "
             f"num_encoder_layers={self.num_encoder_layers}, "

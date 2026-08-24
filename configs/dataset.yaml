@@ -38,9 +38,9 @@ dataset:
 
   max_lanes: 256
 
-  lane_sample_points: 20
+  map_sample_points: 20
 
-  agent_agent_radius: 30.0
+  spatial_radius: 30.0
 
   lane_agent_radius: 20.0
 

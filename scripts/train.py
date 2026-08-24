@@ -15,7 +15,6 @@ Responsibilities
 - Training through engine.Trainer
 - Validation
 - Checkpointing
-- Resume support
 - Epoch logging
 
 Configuration
@@ -39,14 +38,15 @@ Current DSTNet model contract
 DSTNet.forward(
     *,
     agent_trajectories,
-    lane_centerlines,
+    map_centerlines,
     positions,
     graph,
     agent_mask=None,
-    lane_mask=None,
+    map_mask=None,
 )
 
-No ``headings`` argument is passed to DSTNet.
+``headings`` remains part of the dataset/SceneGraph state contract,
+but is not passed as a separate argument at the DSTNet boundary.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 
 ###############################################################################
@@ -409,7 +409,6 @@ def build_dataset(
     #
     #     data/argoverse1/hd_maps/map_files
     #
-    #
     map_root = (
         map_root
         / "hd_maps"
@@ -491,12 +490,42 @@ def build_dataset(
 
 
 ###############################################################################
+# Dataset Split Roots
+###############################################################################
+
+
+def build_dataset_roots() -> tuple[Path, Path]:
+    """
+    Resolve the configured training and validation dataset roots.
+    """
+
+    train_root = resolve_path(
+        _require_attribute(
+            CFG,
+            "dataset.train_dir",
+        )
+    )
+
+    val_root = resolve_path(
+        _require_attribute(
+            CFG,
+            "dataset.val_dir",
+        )
+    )
+
+    return (
+        train_root,
+        val_root,
+    )
+
+
+###############################################################################
 # DataLoader
 ###############################################################################
 
 
 def build_dataloader(
-    dataset: ArgoverseDataset,
+    dataset: Dataset,
     *,
     train: bool,
     batch_size: int,
@@ -505,6 +534,9 @@ def build_dataloader(
 ) -> DataLoader:
     """
     Construct a DataLoader from runtime/training configuration.
+
+    ``Dataset`` is used here rather than ``ArgoverseDataset`` because
+    framework-validation runs may legitimately pass a ``Subset``.
     """
 
     return DataLoader(
@@ -545,10 +577,10 @@ def build_model() -> DSTNet:
         )
     )
 
-    lane_points = int(
+    map_points = int(
         _require_attribute(
             CFG,
-            "dataset.lane_sample_points",
+            "dataset.map_sample_points",
         )
     )
 
@@ -600,7 +632,7 @@ def build_model() -> DSTNet:
     model = DSTNet(
         observation_steps=observation_steps,
         prediction_steps=prediction_steps,
-        lane_points=lane_points,
+        map_points=map_points,
         hidden_dim=hidden_dim,
         num_heads=num_heads,
         num_encoder_layers=num_encoder_layers,
@@ -979,19 +1011,7 @@ def main() -> None:
     # Dataset Paths
     ###########################################################################
 
-    train_root = resolve_path(
-        _require_attribute(
-            CFG,
-            "dataset.train_dir",
-        )
-    )
-
-    val_root = resolve_path(
-        _require_attribute(
-            CFG,
-            "dataset.val_dir",
-        )
-    )
+    train_root, val_root = build_dataset_roots()
 
     if not train_root.exists():
 
