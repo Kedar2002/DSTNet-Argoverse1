@@ -1397,9 +1397,9 @@ class GSTA(nn.Module):
             spatial_features,
         )
 
-    ###########################################################################
+    ###############################################################################
     # Temporal Self-Attention
-    ###########################################################################
+    ###############################################################################
 
     def _temporal_self_attention(
         self,
@@ -1422,26 +1422,78 @@ class GSTA(nn.Module):
         ------
 
             (B,N,H,D)
+
+        Numerical-stability handling
+        ----------------------------
+
+        A padded agent may have all of its historical states marked
+        invalid by agent_mask.
+
+        Passing such a completely masked sequence to
+        torch.nn.MultiheadAttention can produce:
+
+            softmax([-inf, ..., -inf]) -> NaN
+
+        Therefore invalid agent sequences are zeroed before attention,
+        and no key-padding mask is supplied to the temporal MHA.
+
+        Since temporal attention is performed independently for each
+        agent, this does not allow one agent to attend to another agent.
+
+        After attention, invalid agents are explicitly zeroed again.
         """
 
-        (
-            batch_size,
-            num_agents,
-            num_steps,
-            hidden_dim,
-        ) = features.shape
+        batch_size, num_agents, num_steps, hidden_dim = (
+            features.shape
+        )
+
+        ###########################################################################
+        # Normalize features.
+        ###########################################################################
 
         x = self.temporal_norm(
             features
         )
 
-        #######################################################################
+        ###########################################################################
+        # Agent validity.
+        #
+        # agent_mask:
+        #
+        #     (B,N)
+        #
+        # True  -> real agent
+        # False -> padded agent
+        ###########################################################################
+
+        valid_agents = None
+
+        if agent_mask is not None:
+
+            valid_agents = agent_mask.to(
+                device=x.device,
+                dtype=torch.bool,
+            )
+
+            #######################################################################
+            # Zero all states belonging to padded agents.
+            #
+            # This prevents invalid/padded features from participating in
+            # temporal attention.
+            #######################################################################
+
+            x = x.masked_fill(
+                ~valid_agents.unsqueeze(-1).unsqueeze(-1),
+                0.0,
+            )
+
+        ###########################################################################
         # Flatten batch and agent dimensions.
         #
-        # Each agent becomes an independent attention sequence:
+        # Each agent becomes an independent temporal sequence:
         #
         #     (B*N,H,D)
-        #######################################################################
+        ###########################################################################
 
         x = x.reshape(
             batch_size * num_agents,
@@ -1449,44 +1501,38 @@ class GSTA(nn.Module):
             hidden_dim,
         )
 
-        key_padding_mask = None
-
-        if agent_mask is not None:
-
-            valid = (
-                agent_mask
-                .to(dtype=torch.bool)
-            )
-
-            key_padding_mask = (
-                ~valid
-            ).unsqueeze(-1).expand(
-                batch_size,
-                num_agents,
-                num_steps,
-            )
-
-            key_padding_mask = (
-                key_padding_mask
-                .reshape(
-                    batch_size * num_agents,
-                    num_steps,
-                )
-            )
+        ###########################################################################
+        # Temporal self-attention.
+        #
+        # IMPORTANT:
+        #
+        # Do NOT pass a key_padding_mask here.
+        #
+        # A padded agent's complete sequence has already been zeroed,
+        # avoiding the fully-masked-row -> NaN problem.
+        ###########################################################################
 
         attended, _ = (
             self.temporal_attention(
                 query=x,
                 key=x,
                 value=x,
-                key_padding_mask=key_padding_mask,
+                key_padding_mask=None,
                 need_weights=False,
             )
         )
 
+        ###########################################################################
+        # Dropout.
+        ###########################################################################
+
         attended = self.dropout(
             attended
         )
+
+        ###########################################################################
+        # Restore (B,N,H,D).
+        ###########################################################################
 
         attended = attended.reshape(
             batch_size,
@@ -1495,14 +1541,47 @@ class GSTA(nn.Module):
             hidden_dim,
         )
 
-        return (
+        ###########################################################################
+        # Residual connection.
+        ###########################################################################
+
+        output = (
             features
             + attended
         )
 
-    ###########################################################################
+        ###########################################################################
+        # Explicitly zero padded agents.
+        #
+        # This is important because the original residual `features`
+        # may contain non-zero padded representations.
+        ###########################################################################
+
+        if valid_agents is not None:
+
+            output = output.masked_fill(
+                ~valid_agents.unsqueeze(-1).unsqueeze(-1),
+                0.0,
+            )
+
+        ###########################################################################
+        # Defensive numerical check.
+        ###########################################################################
+
+        if not torch.isfinite(
+            output
+        ).all():
+
+            raise FloatingPointError(
+                "GSTA temporal self-attention produced "
+                "NaN or infinite values."
+            )
+
+        return output
+
+    ###############################################################################
     # Spatial Self-Attention
-    ###########################################################################
+    ###############################################################################
 
     def _spatial_self_attention(
         self,
@@ -1524,19 +1603,82 @@ class GSTA(nn.Module):
         ------
 
             (B,M,D)
+
+        Numerical-stability handling
+        ----------------------------
+
+        If a scene contains no valid map nodes, passing an entirely
+        masked sequence to MultiheadAttention can produce NaN.
+
+        Therefore the implementation guarantees that every attention
+        sequence contains at least one unmasked token.
         """
 
         x = self.spatial_norm(
             features
         )
 
-        key_padding_mask = None
+        valid_maps = None
 
         if map_mask is not None:
 
-            key_padding_mask = ~map_mask.to(
-                dtype=torch.bool
+            valid_maps = map_mask.to(
+                device=x.device,
+                dtype=torch.bool,
             )
+
+            #######################################################################
+            # Zero invalid map nodes.
+            #######################################################################
+
+            x = x.masked_fill(
+                ~valid_maps.unsqueeze(-1),
+                0.0,
+            )
+
+            #######################################################################
+            # Detect scenes with no valid map nodes.
+            #######################################################################
+
+            has_valid_map = (
+                valid_maps.any(
+                    dim=1
+                )
+            )
+
+            #######################################################################
+            # MultiheadAttention cannot safely process a completely
+            # masked sequence.
+            #
+            # Temporarily allow the first map token to participate in
+            # such a scene. It contains zero features, so it cannot
+            # introduce meaningful map information.
+            #######################################################################
+
+            safe_mask = (
+                ~valid_maps
+            ).clone()
+
+            no_valid_map = ~has_valid_map
+
+            if torch.any(
+                no_valid_map
+            ):
+
+                safe_mask[
+                    no_valid_map,
+                    0,
+                ] = False
+
+            key_padding_mask = safe_mask
+
+        else:
+
+            key_padding_mask = None
+
+        ###########################################################################
+        # Spatial self-attention.
+        ###########################################################################
 
         attended, _ = (
             self.spatial_attention(
@@ -1552,10 +1694,36 @@ class GSTA(nn.Module):
             attended
         )
 
-        return (
+        output = (
             features
             + attended
         )
+
+        ###########################################################################
+        # Explicitly zero invalid map nodes.
+        ###########################################################################
+
+        if valid_maps is not None:
+
+            output = output.masked_fill(
+                ~valid_maps.unsqueeze(-1),
+                0.0,
+            )
+
+        ###########################################################################
+        # Numerical validation.
+        ###########################################################################
+
+        if not torch.isfinite(
+            output
+        ).all():
+
+            raise FloatingPointError(
+                "GSTA spatial self-attention produced "
+                "NaN or infinite values."
+            )
+
+        return output
 
     ###########################################################################
     # Temporal -> Spatial
