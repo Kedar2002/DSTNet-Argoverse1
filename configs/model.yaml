@@ -16,7 +16,7 @@ model:
 
   future_steps: 30
 
-  enable_refinement: true
+  enable_refinement: false
 
   refinement_iterations: 1
 

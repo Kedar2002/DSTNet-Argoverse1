@@ -228,7 +228,7 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 
-BATCH_SIZE = 8
+BATCH_SIZE = 6
 
 NUM_WORKERS = 2
 
