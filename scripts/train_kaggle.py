@@ -234,7 +234,7 @@ NUM_WORKERS = 4
 
 EPOCHS = 30
 
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 1e-5
 
 WEIGHT_DECAY = 1e-2
 
@@ -248,16 +248,10 @@ VALIDATE_EVERY = 5
 # Mixed Precision
 ###############################################################################
 
-USE_AMP = (
-    DEVICE.type == "cuda"
-)
+USE_AMP = False
 
-AMP_DTYPE = torch.float16
+AMP_DTYPE = torch.float32
 
-# AMP_SCALER = GradScaler(
-#     "cuda",
-#     enabled=USE_AMP,
-# )
 
 # Printing every 10 batches is unnecessarily expensive
 # for ~100k batches per epoch.
