@@ -149,6 +149,9 @@ class DSTNet(nn.Module):
         num_modes: int = 6,
         interaction_radius: float = 30.0,
         refinement_iterations: int = 2,
+        r_min: float = 5.0,
+        r_max: float | None = None,
+        radius_hidden_dim: int | None = None,
         dropout: float = 0.1,
     ) -> None:
 
@@ -221,6 +224,9 @@ class DSTNet(nn.Module):
         self.num_modes = num_modes
         self.interaction_radius = interaction_radius
         self.refinement_iterations = refinement_iterations
+        self.r_min = r_min
+        self.r_max = r_max
+        self.radius_hidden_dim = radius_hidden_dim
         self.dropout = dropout
 
         #######################################################################
@@ -269,6 +275,9 @@ class DSTNet(nn.Module):
             num_modes=num_modes,
             observation_steps=observation_steps,
             interaction_radius=interaction_radius,
+            r_min=r_min,
+            r_max=r_max,
+            radius_hidden_dim=radius_hidden_dim,
             dropout=dropout,
         )
 

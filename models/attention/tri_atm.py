@@ -29,7 +29,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from models.attention.mspa import MSPA
+from models.attention.arp_mspa import ARPMSPA
 from models.attention.mhca import MHCA
 from models.attention.mmia import MMIA
 
@@ -56,6 +56,9 @@ class TriATM(nn.Module):
         hidden_dim: int,
         num_heads: int,
         interaction_radius: float,
+        r_min: float,
+        r_max: float | None = None,
+        radius_hidden_dim: int | None = None,
         window_sizes: tuple[int, ...] = (
             2,
             4,
@@ -87,10 +90,13 @@ class TriATM(nn.Module):
         # MSPA
         #######################################################################
 
-        self.mspa = MSPA(
+        self.arp_mspa = ARPMSPA(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             interaction_radius=interaction_radius,
+            r_min=r_min,
+            r_max=r_max,
+            radius_hidden_dim=radius_hidden_dim,
             dropout=dropout,
         )
 
@@ -205,7 +211,7 @@ class TriATM(nn.Module):
         # Z_scene → Z^S
         #######################################################################
 
-        spatial_embeddings = self.mspa(
+        spatial_embeddings = self.arp_mspa(
             scene_embeddings,
             positions,
             agent_mask=agent_mask,

@@ -22,19 +22,13 @@ model:
 
   interaction_radius: 30.0
 
-  mspa:
+  arp_mspa:
 
-    radii:
-      - 2.0
-      - 5.0
-      - 10.0
-      - 20.0
-      - 30.0
-      - 40.0
-      - 60.0
-      - inf
+    r_min: 2.0
 
-    feature_dropout: 0.1
+    r_max: 30.0
+
+    radius_hidden_dim: 256
 
   mhca:
 

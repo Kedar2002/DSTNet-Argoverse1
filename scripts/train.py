@@ -619,6 +619,42 @@ def build_model() -> DSTNet:
         )
     )
 
+    r_min = float(
+        _optional_attribute(
+            CFG,
+            (
+                "model.arp_mspa.r_min",
+            ),
+            2.0,
+        )
+    )
+
+    r_max = float(
+        _optional_attribute(
+            CFG,
+            (
+                "model.arp_mspa.r_max",
+            ),
+            30.0,
+        )
+    )
+
+    if r_max is not None:
+        r_max = float(r_max)
+
+    radius_hidden_dim = int(
+        _optional_attribute(
+            CFG,
+            (
+                "model.arp_mspa.radius_hidden_dim",
+            ),
+            256,
+        )
+    )
+
+    if radius_hidden_dim is not None:
+        radius_hidden_dim = int(radius_hidden_dim)
+
     dropout = float(
         _optional_attribute(
             CFG,
@@ -638,6 +674,9 @@ def build_model() -> DSTNet:
         num_encoder_layers=num_encoder_layers,
         num_modes=num_modes,
         refinement_iterations=refinement_iterations,
+        r_min=r_min,
+        r_max=r_max,
+        radius_hidden_dim=radius_hidden_dim,
         dropout=dropout,
     )
 

@@ -131,6 +131,9 @@ class Encoder(nn.Module):
         num_modes: int = 6,
         observation_steps: int = 20,
         interaction_radius: float = 30.0,
+        r_min: float = 5.0,
+        r_max: float | None = None,
+        radius_hidden_dim: int | None = None,
         dropout: float = 0.1,
     ) -> None:
 
@@ -197,6 +200,22 @@ class Encoder(nn.Module):
 
         self.interaction_radius = float(
             interaction_radius
+        )
+
+        self.r_min = float(
+            r_min
+        )
+
+        self.r_max = (
+            None
+            if r_max is None
+            else float(r_max)
+        )
+
+        self.radius_hidden_dim = (
+            None
+            if radius_hidden_dim is None
+            else int(radius_hidden_dim)
         )
 
         self.dropout = float(
@@ -275,6 +294,9 @@ class Encoder(nn.Module):
                     hidden_dim=self.hidden_dim,
                     num_heads=self.num_heads,
                     interaction_radius=self.interaction_radius,
+                    r_min=self.r_min,
+                    r_max=self.r_max,
+                    radius_hidden_dim=self.radius_hidden_dim,
                     dropout=self.dropout,
                 )
                 for _ in range(self.num_layers)
