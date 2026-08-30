@@ -18,7 +18,7 @@ model:
 
   enable_refinement: true
 
-  refinement_iterations: 2
+  refinement_iterations: 1
 
   interaction_radius: 30.0
 

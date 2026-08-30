@@ -228,9 +228,9 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 
-BATCH_SIZE = 2
+BATCH_SIZE = 8
 
-NUM_WORKERS = 4
+NUM_WORKERS = 2
 
 EPOCHS = 30
 
@@ -238,7 +238,7 @@ LEARNING_RATE = 1e-5
 
 WEIGHT_DECAY = 1e-2
 
-SAVE_EVERY = 1
+SAVE_EVERY = 2
 
 GRADIENT_CLIP = 2.0
 
@@ -248,9 +248,9 @@ VALIDATE_EVERY = 5
 # Mixed Precision
 ###############################################################################
 
-USE_AMP = False
+USE_AMP = True
 
-AMP_DTYPE = torch.float32
+AMP_DTYPE = torch.bfloat16
 
 
 # Printing every 10 batches is unnecessarily expensive
