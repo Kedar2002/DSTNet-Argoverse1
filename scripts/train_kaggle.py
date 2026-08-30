@@ -1444,6 +1444,10 @@ def train_one_epoch(
             # Do not perform optimizer.step() on this batch.
             # ---------------------------------------------------------------
 
+            if USE_AMP:
+
+                scaler.update()
+
             optimizer.zero_grad(
                 set_to_none=True,
             )
@@ -1460,7 +1464,7 @@ def train_one_epoch(
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 max_norm=GRADIENT_CLIP,
-                error_if_nonfinite=False,
+                error_if_nonfinite=True,
             )
         )
 
