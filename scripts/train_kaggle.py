@@ -228,19 +228,19 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 
-BATCH_SIZE = 3
+BATCH_SIZE = 4
 
-NUM_WORKERS = 2
+NUM_WORKERS = 4
 
 EPOCHS = 30
 
-LEARNING_RATE = 1e-5
+LEARNING_RATE = 1e-6
 
 WEIGHT_DECAY = 1e-2
 
-SAVE_EVERY = 2
+SAVE_EVERY = 1
 
-GRADIENT_CLIP = 2.0
+GRADIENT_CLIP = 0.5
 
 VALIDATE_EVERY = 5
 
@@ -250,18 +250,18 @@ VALIDATE_EVERY = 5
 
 USE_AMP = True
 
-AMP_DTYPE = torch.bfloat16
+AMP_DTYPE = torch.float16
 
 
 # Printing every 10 batches is unnecessarily expensive
 # for ~100k batches per epoch.
-LOG_EVERY = 500
+LOG_EVERY = 1000
 
 ###############################################################################
 # Early Stopping
 ###############################################################################
 
-EARLY_STOPPING = True
+EARLY_STOPPING = False
 
 PATIENCE = 3
 
@@ -1180,6 +1180,8 @@ def train_one_epoch(
 
     epoch_start = time.perf_counter()
 
+    skipped_batches = 0
+
     for batch_index, batch in enumerate(
         dataloader,
         start=1,
@@ -1403,41 +1405,52 @@ def train_one_epoch(
 
             print()
             print("=" * 80)
-            print("NON-FINITE GRADIENT DETECTED")
+            print("NON-FINITE GRADIENTS — SKIPPING BATCH")
             print("=" * 80)
 
             print(
-                f"Number of affected parameters: "
-                f"{len(nonfinite_gradients)}"
-            )
-
-            for name in nonfinite_gradients[:20]:
-                print(
-                    f"  {name}"
-                )
-
-            if len(nonfinite_gradients) > 20:
-                print(
-                    f"  ... and "
-                    f"{len(nonfinite_gradients) - 20} more"
-                )
-
-            print()
-            print(
                 f"Epoch : {epoch}"
             )
+
             print(
                 f"Batch : {batch_index}"
             )
+
             print(
                 f"Loss  : "
                 f"{loss.detach().item():.8f}"
             )
 
-            raise FloatingPointError(
-                "Non-finite gradients detected "
-                "before gradient clipping."
+            print(
+                f"Affected parameters : "
+                f"{len(nonfinite_gradients)}"
             )
+
+            for name in nonfinite_gradients[:10]:
+
+                print(
+                    f"  {name}"
+                )
+
+            if len(nonfinite_gradients) > 10:
+
+                print(
+                    f"  ... and "
+                    f"{len(nonfinite_gradients) - 10} more"
+                )
+
+            # ---------------------------------------------------------------
+            # IMPORTANT:
+            # Do not perform optimizer.step() on this batch.
+            # ---------------------------------------------------------------
+
+            optimizer.zero_grad(
+                set_to_none=True,
+            )
+
+            skipped_batches += 1
+
+            continue
 
         #######################################################################
         # Gradient clipping
@@ -1446,8 +1459,8 @@ def train_one_epoch(
         gradient_norm = (
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
-                max_norm=1.0,
-                error_if_nonfinite=True,
+                max_norm=GRADIENT_CLIP,
+                error_if_nonfinite=False,
             )
         )
 
@@ -1546,6 +1559,12 @@ def train_one_epoch(
     print(
         f"Training Epoch Time : "
         f"{epoch_time:.2f} s",
+        flush=True,
+    )
+
+    print(
+        f"Skipped Non-Finite Batches : "
+        f"{skipped_batches}",
         flush=True,
     )
 
@@ -1903,7 +1922,6 @@ def run_training() -> None:
 
             if (
                 epoch % VALIDATE_EVERY == 0
-                or epoch == 1
                 or epoch == EPOCHS
             ):
 
