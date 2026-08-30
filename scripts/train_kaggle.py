@@ -906,47 +906,94 @@ def load_checkpoint(
             scheduler_state
         )
 
-    if "torch_rng_state" in checkpoint:
+    ###########################################################################
+    # RNG State Restoration
+    #
+    # RNG restoration is optional. A malformed/legacy RNG state must NEVER
+    # prevent a valid model/optimizer/scheduler checkpoint from loading.
+    ###########################################################################
 
-        rng_state = checkpoint.get("rng_state")
+    try:
 
-        if rng_state is not None:
+        torch_rng_state = checkpoint.get(
+            "torch_rng_state",
+            checkpoint.get("rng_state"),
+        )
 
-            if not isinstance(
-                rng_state,
-                torch.Tensor,
-            ):
+        if isinstance(
+            torch_rng_state,
+            torch.Tensor,
+        ):
 
-                rng_state = torch.tensor(
-                    rng_state,
-                    dtype=torch.uint8,
+            if torch_rng_state.dtype == torch.uint8:
+
+                torch.set_rng_state(
+                    torch_rng_state.cpu()
                 )
 
-            elif rng_state.dtype != torch.uint8:
+    except Exception as exc:
 
-                rng_state = rng_state.to(
-                    dtype=torch.uint8
-                )
+        print(
+            f"Warning: CPU RNG state could not be restored: "
+            f"{exc}"
+        )
 
-            torch.set_rng_state(
-                rng_state.cpu()
+    ###########################################################################
+    # CUDA RNG
+    ###########################################################################
+
+    if torch.cuda.is_available():
+
+        try:
+
+            cuda_rng_state = checkpoint.get(
+                "cuda_rng_state_all",
+                checkpoint.get("cuda_rng_states"),
             )
 
-    if (
+            if cuda_rng_state is not None:
 
-        torch.cuda.is_available()
+                valid_cuda_states = []
 
-        and checkpoint.get(
-            "cuda_rng_state_all"
-        ) is not None
-    ):
+                for state in cuda_rng_state:
 
-        torch.cuda.set_rng_state_all(
+                    if isinstance(
+                        state,
+                        torch.Tensor,
+                    ):
 
-            checkpoint[
-                "cuda_rng_state_all"
-            ]
-        )
+                        state = state.cpu()
+
+                        if state.dtype == torch.uint8:
+
+                            valid_cuda_states.append(
+                                state
+                            )
+
+                if (
+                    len(valid_cuda_states)
+                    == torch.cuda.device_count()
+                ):
+
+                    torch.cuda.set_rng_state_all(
+                        valid_cuda_states
+                    )
+
+                else:
+
+                    print(
+                        "Warning: CUDA RNG state in checkpoint "
+                        "is incompatible with the current CUDA "
+                        "device configuration. Skipping RNG "
+                        "restoration."
+                    )
+
+        except Exception as exc:
+
+            print(
+                f"Warning: CUDA RNG state could not be restored: "
+                f"{exc}"
+            )
 
     epoch = int(
 
