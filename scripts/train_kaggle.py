@@ -908,12 +908,29 @@ def load_checkpoint(
 
     if "torch_rng_state" in checkpoint:
 
-        torch.set_rng_state(
+        rng_state = checkpoint.get("rng_state")
 
-            checkpoint[
-                "torch_rng_state"
-            ]
-        )
+        if rng_state is not None:
+
+            if not isinstance(
+                rng_state,
+                torch.Tensor,
+            ):
+
+                rng_state = torch.tensor(
+                    rng_state,
+                    dtype=torch.uint8,
+                )
+
+            elif rng_state.dtype != torch.uint8:
+
+                rng_state = rng_state.to(
+                    dtype=torch.uint8
+                )
+
+            torch.set_rng_state(
+                rng_state.cpu()
+            )
 
     if (
 
