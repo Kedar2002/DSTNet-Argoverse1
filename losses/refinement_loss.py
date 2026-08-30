@@ -86,7 +86,7 @@ class RefinementLoss(nn.Module):
         self,
         trajectory_weight: float = 1.0,
         endpoint_weight: float = 0.5,
-        smoothness_weight: float = 0.05,
+        smoothness_weight: float = 0.0,
     ) -> None:
 
         super().__init__()
