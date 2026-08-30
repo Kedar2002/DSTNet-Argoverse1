@@ -50,6 +50,8 @@ import time
 from pathlib import Path
 
 import torch
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
 from torch.utils.data import DataLoader
 
 
@@ -226,11 +228,11 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 
-BATCH_SIZE = 2
+BATCH_SIZE = 4
 
-NUM_WORKERS = 2
+NUM_WORKERS = 4
 
-EPOCHS = 60
+EPOCHS = 30
 
 LEARNING_RATE = 1e-4
 
@@ -240,6 +242,26 @@ SAVE_EVERY = 1
 
 GRADIENT_CLIP = 2.0
 
+VALIDATE_EVERY = 5
+
+###############################################################################
+# Mixed Precision
+###############################################################################
+
+USE_AMP = (
+    DEVICE.type == "cuda"
+)
+
+AMP_DTYPE = torch.float16
+
+# AMP_SCALER = GradScaler(
+#     "cuda",
+#     enabled=USE_AMP,
+# )
+
+# Printing every 10 batches is unnecessarily expensive
+# for ~100k batches per epoch.
+LOG_EVERY = 500
 
 ###############################################################################
 # Early Stopping
@@ -247,7 +269,7 @@ GRADIENT_CLIP = 2.0
 
 EARLY_STOPPING = True
 
-PATIENCE = 10
+PATIENCE = 3
 
 
 ###############################################################################
@@ -435,23 +457,26 @@ def build_dataloader(
     train: bool,
 ) -> DataLoader:
 
-    return DataLoader(
-
-        dataset,
-
-        batch_size=BATCH_SIZE,
-
-        shuffle=train,
-
-        num_workers=NUM_WORKERS,
-
-        collate_fn=collate_fn,
-
-        pin_memory=(
+    kwargs = {
+        "dataset": dataset,
+        "batch_size": BATCH_SIZE,
+        "shuffle": train,
+        "num_workers": NUM_WORKERS,
+        "collate_fn": collate_fn,
+        "pin_memory": (
             DEVICE.type == "cuda"
         ),
+        "drop_last": False,
+    }
 
-        drop_last=False,
+    if NUM_WORKERS > 0:
+
+        kwargs["persistent_workers"] = True
+
+        kwargs["prefetch_factor"] = 2
+
+    return DataLoader(
+        **kwargs,
     )
 
 
@@ -1067,9 +1092,12 @@ def train_one_epoch(
     optimizer,
     scheduler,
     criterion: TotalLoss,
+    scaler: GradScaler,
 ) -> float:
     """
     Train DSTNet for one complete epoch.
+
+    Uses CUDA automatic mixed precision when available.
     """
 
     model.train()
@@ -1085,9 +1113,7 @@ def train_one_epoch(
     )
 
     for batch_index, batch in enumerate(
-
         dataloader,
-
         start=1,
     ):
 
@@ -1096,13 +1122,11 @@ def train_one_epoch(
         )
 
         #######################################################################
-        # Move complete batch to device
+        # Move batch to device
         #######################################################################
 
         batch = move_to_device(
-
             batch,
-
             DEVICE,
         )
 
@@ -1111,76 +1135,85 @@ def train_one_epoch(
         #######################################################################
 
         optimizer.zero_grad(
-
             set_to_none=True,
         )
 
         #######################################################################
-        # Current DSTNet forward interface
+        # Mixed-precision forward + loss
         #######################################################################
 
-        (
-            coarse_prediction,
-            refined_prediction,
-        ) = model(
-
-            agent_trajectories=(
-                batch[
-                    "agent_trajectories"
-                ]
+        with autocast(
+            device_type=DEVICE.type,
+            dtype=(
+                AMP_DTYPE
+                if USE_AMP
+                else torch.float32
             ),
+            enabled=USE_AMP,
+        ):
 
-            map_centerlines=(
-                batch[
-                    "map_centerlines"
-                ]
-            ),
+            (
+                coarse_prediction,
+                refined_prediction,
+            ) = model(
 
-            positions=(
-                batch[
-                    "positions"
-                ]
-            ),
+                agent_trajectories=(
+                    batch[
+                        "agent_trajectories"
+                    ]
+                ),
 
-            graph=(
-                batch[
-                    "graph"
-                ]
-            ),
+                map_centerlines=(
+                    batch[
+                        "map_centerlines"
+                    ]
+                ),
 
-            agent_mask=batch.get(
-                "agent_mask"
-            ),
+                positions=(
+                    batch[
+                        "positions"
+                    ]
+                ),
 
-            map_mask=batch.get(
-                "map_mask"
-            ),
-        )
+                graph=(
+                    batch[
+                        "graph"
+                    ]
+                ),
+
+                agent_mask=batch.get(
+                    "agent_mask"
+                ),
+
+                map_mask=batch.get(
+                    "map_mask"
+                ),
+            )
+
+            losses = criterion(
+
+                prediction=(
+                    coarse_prediction
+                ),
+
+                refined_prediction=(
+                    refined_prediction
+                ),
+
+                ground_truth=(
+                    batch[
+                        "future_trajectories"
+                    ]
+                ),
+            )
+
+            loss = losses[
+                "loss"
+            ]
 
         #######################################################################
-        # Loss
+        # Numerical sanity check
         #######################################################################
-
-        losses = criterion(
-
-            prediction=(
-                coarse_prediction
-            ),
-
-            refined_prediction=(
-                refined_prediction
-            ),
-
-            ground_truth=(
-                batch[
-                    "future_trajectories"
-                ]
-            ),
-        )
-
-        loss = losses[
-            "loss"
-        ]
 
         if not torch.isfinite(
             loss
@@ -1194,14 +1227,20 @@ def train_one_epoch(
             )
 
         #######################################################################
-        # Backward
+        # Scaled backward
         #######################################################################
 
-        loss.backward()
+        scaler.scale(
+            loss
+        ).backward()
 
         #######################################################################
-        # Gradient clipping
+        # Unscale before gradient clipping
         #######################################################################
+
+        scaler.unscale_(
+            optimizer
+        )
 
         gradient_norm = (
             torch.nn.utils.clip_grad_norm_(
@@ -1215,10 +1254,18 @@ def train_one_epoch(
         )
 
         #######################################################################
-        # Optimizer / Scheduler
+        # Optimizer
         #######################################################################
 
-        optimizer.step()
+        scaler.step(
+            optimizer
+        )
+
+        scaler.update()
+
+        #######################################################################
+        # Scheduler
+        #######################################################################
 
         if scheduler is not None:
 
@@ -1229,22 +1276,21 @@ def train_one_epoch(
         #######################################################################
 
         running_loss += (
-            loss.item()
+            loss.detach().item()
         )
 
         batch_time = (
-
             time.perf_counter()
-
             - batch_start
         )
 
+        #######################################################################
+        # Reduced logging frequency
+        #######################################################################
+
         if (
-
             batch_index == 1
-
-            or batch_index % 10 == 0
-
+            or batch_index % LOG_EVERY == 0
             or batch_index == num_batches
         ):
 
@@ -1252,10 +1298,10 @@ def train_one_epoch(
 
                 f"Epoch {epoch:03d} "
 
-                f"[{batch_index:04d}/"
-                f"{num_batches:04d}] "
+                f"[{batch_index:06d}/"
+                f"{num_batches:06d}] "
 
-                f"loss={loss.item():.6f} "
+                f"loss={loss.detach().item():.6f} "
 
                 f"grad={float(gradient_norm):.4f} "
 
@@ -1265,6 +1311,10 @@ def train_one_epoch(
                 f"time={batch_time:.2f}s"
             )
 
+    ###########################################################################
+    # Empty loader check
+    ###########################################################################
+
     if num_batches == 0:
 
         raise RuntimeError(
@@ -1273,30 +1323,28 @@ def train_one_epoch(
             "zero batches."
         )
 
+    ###########################################################################
+    # Epoch statistics
+    ###########################################################################
+
     epoch_time = (
-
         time.perf_counter()
-
         - epoch_start
     )
 
     average_loss = (
-
         running_loss
-
         / num_batches
     )
 
     print()
 
     print(
-
         f"Training Epoch {epoch} "
         f"Loss : {average_loss:.6f}"
     )
 
     print(
-
         f"Training Epoch Time : "
         f"{epoch_time:.2f} s"
     )
@@ -1569,6 +1617,11 @@ def run_training() -> None:
 
     model = build_model()
 
+    scaler = GradScaler(
+        device="cuda",
+        enabled=USE_AMP,
+    )
+
     ###########################################################################
     # Training Components
     ###########################################################################
@@ -1644,16 +1697,32 @@ def run_training() -> None:
                 scheduler=scheduler,
 
                 criterion=criterion,
+
+                scaler=scaler,
             )
 
-            val_metrics = (
-                validate_one_epoch(
+            if (
+                epoch % VALIDATE_EVERY == 0
+                or epoch == 1
+                or epoch == EPOCHS
+            ):
 
-                    model=model,
+                val_metrics = (
+                    validate_one_epoch(
 
-                    dataloader=val_loader,
+                        model=model,
+
+                        dataloader=val_loader,
+                    )
                 )
-            )
+
+            else:
+
+                val_metrics = {
+                    "minADE": best_metric,
+                    "minFDE": float("nan"),
+                    "MissRate": float("nan"),
+                }
 
             epoch_time = (
 
