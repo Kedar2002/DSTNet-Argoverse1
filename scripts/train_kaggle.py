@@ -228,7 +228,7 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 
-BATCH_SIZE = 4
+BATCH_SIZE = 3
 
 NUM_WORKERS = 2
 
@@ -248,7 +248,7 @@ VALIDATE_EVERY = 5
 # Mixed Precision
 ###############################################################################
 
-USE_AMP = False
+USE_AMP = True
 
 AMP_DTYPE = torch.bfloat16
 
