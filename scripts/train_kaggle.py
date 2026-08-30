@@ -1306,15 +1306,43 @@ def train_one_epoch(
             optimizer
         )
 
-        gradient_norm = (
-            torch.nn.utils.clip_grad_norm_(
+        # ------------------------------------------------------------------
+        # Gradient finite-value check
+        # ------------------------------------------------------------------
+        nonfinite_gradients = []
 
-                model.parameters(),
+        for name, parameter in model.named_parameters():
+            if parameter.grad is not None:
+                if not torch.isfinite(parameter.grad).all():
+                    nonfinite_gradients.append(name)
 
-                max_norm=GRADIENT_CLIP,
+        if nonfinite_gradients:
+            print("\n" + "=" * 80)
+            print("NON-FINITE GRADIENT DETECTED")
+            print("=" * 80)
 
-                error_if_nonfinite=True,
+            print(f"Number of affected parameters: {len(nonfinite_gradients)}")
+
+            for name in nonfinite_gradients[:20]:
+                print(f"  {name}")
+
+            if len(nonfinite_gradients) > 20:
+                print(
+                    f"  ... and "
+                    f"{len(nonfinite_gradients) - 20} more"
+                )
+
+            raise FloatingPointError(
+                "Non-finite gradients detected before gradient clipping."
             )
+
+        # ------------------------------------------------------------------
+        # Gradient clipping
+        # ------------------------------------------------------------------
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=1.0,
+            error_if_nonfinite=True,
         )
 
         #######################################################################
