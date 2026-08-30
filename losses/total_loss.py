@@ -1,4 +1,6 @@
 """
+losses.total_loss
+
 Complete DSTNet training objective.
 
 Paper
@@ -20,12 +22,12 @@ with the score term weighted by lambda:
         + L_refinement
         + lambda * L_score
 
-The current implementation uses:
+The default implementation uses:
 
     lambda = 0.1
 
-Current tensor contracts
-------------------------
+Current DSTNet tensor contracts
+-------------------------------
 
 Prediction:
 
@@ -35,22 +37,42 @@ Prediction:
     probabilities
         (B,N,H,K)
 
-RefinedPrediction:
+RefinedPrediction, when refinement is enabled:
 
     trajectories
         (B,N,H,K,T,2)
 
-    probabilities
+    scores
         (B,N,H,K)
 
-    refinement_scores
-        (B,N,H,K)
+    offsets
+        (B,N,H,K,T,2)
 
-    trajectory_history
-        (B,N,H,K,C+1,T,2)
+Important
+---------
+The current models.dstnet.DSTNet supports:
 
-    refinement_score_history
-        (B,N,H,K,C+1)
+    refinement_enabled=True
+        -> refined_prediction is a RefinedPrediction
+
+    refinement_enabled=False
+        -> refined_prediction is None
+
+Therefore this loss explicitly supports both configurations.
+
+When refinement is disabled:
+
+    L_score      = 0
+    L_refinement = 0
+
+and:
+
+    L_total =
+        L_proposal
+        + L_classification
+
+The disabled refinement losses are created from the coarse prediction
+tensor so that they remain device- and dtype-compatible.
 """
 
 from __future__ import annotations
@@ -69,37 +91,61 @@ from losses.score_loss import ScoreLoss
 from losses.refinement_loss import RefinementLoss
 
 
+###############################################################################
+# TotalLoss
+###############################################################################
+
+
 class TotalLoss(nn.Module):
     """
     Complete DSTNet training objective.
 
     Parameters
     ----------
-    proposal_weight
+    proposal_weight:
         Weight applied to the proposal loss.
 
-    classification_weight
+    classification_weight:
         Weight applied to the classification loss.
 
-    score_weight
+    score_weight:
         Weight lambda applied to ScoreLoss.
 
         Default:
-
             0.1
 
-    refinement_weight
+    refinement_weight:
         Weight applied to the refinement loss.
+
+    refinement_enabled:
+        Whether refinement-dependent losses should be evaluated.
+
+        When False:
+
+            L_score = 0
+            L_refinement = 0
+
+        and the objective becomes:
+
+            L_total =
+                L_proposal
+                + L_classification
 
     Notes
     -----
-    With the default values, the objective is:
+    With refinement enabled and default weights:
 
         L_total =
             L_proposal
             + L_classification
             + L_refinement
             + 0.1 L_score
+
+    With refinement disabled:
+
+        L_total =
+            L_proposal
+            + L_classification
     """
 
     def __init__(
@@ -108,6 +154,7 @@ class TotalLoss(nn.Module):
         classification_weight: float = 1.0,
         score_weight: float = 0.1,
         refinement_weight: float = 1.0,
+        refinement_enabled: bool = True,
     ) -> None:
 
         super().__init__()
@@ -136,6 +183,14 @@ class TotalLoss(nn.Module):
                 "refinement_weight must be non-negative."
             )
 
+        if not isinstance(
+            refinement_enabled,
+            bool,
+        ):
+            raise TypeError(
+                "refinement_enabled must be a bool."
+            )
+
         #######################################################################
         # Store configuration
         #######################################################################
@@ -156,6 +211,8 @@ class TotalLoss(nn.Module):
             refinement_weight,
         )
 
+        self.refinement_enabled = refinement_enabled
+
         #######################################################################
         # Individual loss modules
         #######################################################################
@@ -173,27 +230,92 @@ class TotalLoss(nn.Module):
         )
 
     ###########################################################################
+    # Validation helpers
+    ###########################################################################
+
+    @staticmethod
+    def _validate_scalar_loss(
+        name: str,
+        value: Tensor,
+    ) -> None:
+        """
+        Validate that a loss is a finite scalar tensor.
+        """
+
+        if not isinstance(
+            value,
+            Tensor,
+        ):
+            raise TypeError(
+                f"{name} must be a torch.Tensor."
+            )
+
+        if value.ndim != 0:
+            raise ValueError(
+                f"{name} must be scalar. "
+                f"Got shape {tuple(value.shape)}."
+            )
+
+        if not torch.isfinite(
+            value,
+        ).all():
+            raise RuntimeError(
+                f"{name} contains NaN or infinite values."
+            )
+
+    @staticmethod
+    def _zero_loss(
+        reference: Tensor,
+    ) -> Tensor:
+        """
+        Create a zero scalar compatible with the supplied tensor.
+
+        The returned tensor has:
+
+            device = reference.device
+            dtype   = reference.dtype
+
+        and remains connected to the reference computation graph.
+
+        No refinement-specific tensors are accessed here.
+        """
+
+        return reference.sum() * 0.0
+
+    ###########################################################################
     # Forward
     ###########################################################################
 
     def forward(
         self,
         prediction: Prediction,
-        refined_prediction: RefinedPrediction,
+        refined_prediction: RefinedPrediction | None,
         ground_truth: Tensor,
     ) -> dict[str, Tensor]:
         """
-        Compute the complete DSTNet objective.
+        Compute the complete DSTNet training objective.
 
         Parameters
         ----------
-        prediction
+        prediction:
             Coarse decoder prediction.
 
-        refined_prediction
-            Output of the anchor-based refinement module.
+            trajectories:
+                (B,N,H,K,T,2)
 
-        ground_truth
+            probabilities:
+                (B,N,H,K)
+
+        refined_prediction:
+            Refined prediction produced by DSTNet.
+
+            RefinedPrediction
+                when refinement is enabled
+
+            None
+                when refinement is disabled
+
+        ground_truth:
             Future ground-truth trajectories.
 
             Shape:
@@ -204,7 +326,7 @@ class TotalLoss(nn.Module):
         -------
         dict[str, Tensor]
 
-            Contains:
+            Always contains:
 
                 loss
                 proposal_loss
@@ -212,11 +334,12 @@ class TotalLoss(nn.Module):
                 score_loss
                 refinement_loss
 
-            plus the individual refinement-loss metrics.
+            When refinement is enabled, additional metrics returned
+            by RefinementLoss are also included.
         """
 
         #######################################################################
-        # Validate inputs
+        # Validate coarse prediction
         #######################################################################
 
         if not isinstance(
@@ -227,47 +350,162 @@ class TotalLoss(nn.Module):
                 "prediction must be a Prediction."
             )
 
-        if not isinstance(
-            refined_prediction,
-            RefinedPrediction,
-        ):
-            raise TypeError(
-                "refined_prediction must be a RefinedPrediction."
-            )
+        #######################################################################
+        # Validate refined prediction according to configuration
+        #######################################################################
+
+        if self.refinement_enabled:
+
+            if refined_prediction is None:
+
+                raise ValueError(
+                    "refinement_enabled=True but "
+                    "refined_prediction is None."
+                )
+
+            if not isinstance(
+                refined_prediction,
+                RefinedPrediction,
+            ):
+
+                raise TypeError(
+                    "refined_prediction must be a "
+                    "RefinedPrediction when "
+                    "refinement_enabled=True."
+                )
+
+        else:
+
+            ###################################################################
+            # When refinement is explicitly disabled, DSTNet should return
+            # None. Do not access any refinement-specific attributes.
+            ###################################################################
+
+            if refined_prediction is not None:
+
+                raise ValueError(
+                    "refinement_enabled=False but "
+                    "refined_prediction is not None."
+                )
+
+        #######################################################################
+        # Validate ground truth
+        #######################################################################
 
         if not isinstance(
             ground_truth,
-            torch.Tensor,
+            Tensor,
         ):
             raise TypeError(
                 "ground_truth must be a torch.Tensor."
             )
 
+        if ground_truth.ndim != 4:
+
+            raise ValueError(
+                "ground_truth must have shape "
+                "(B,N,T,2), "
+                f"got {tuple(ground_truth.shape)}."
+            )
+
+        if ground_truth.shape[-1] != 2:
+
+            raise ValueError(
+                "ground_truth must have final dimension 2 "
+                "for x/y coordinates. "
+                f"Got shape {tuple(ground_truth.shape)}."
+            )
+
+        if not torch.isfinite(
+            ground_truth,
+        ).all():
+
+            raise RuntimeError(
+                "ground_truth contains NaN or infinite values."
+            )
+
+        #######################################################################
+        # Validate coarse prediction tensors
+        #######################################################################
+
+        if not isinstance(
+            prediction.trajectories,
+            Tensor,
+        ):
+
+            raise TypeError(
+                "prediction.trajectories must be a "
+                "torch.Tensor."
+            )
+
+        if not isinstance(
+            prediction.probabilities,
+            Tensor,
+        ):
+
+            raise TypeError(
+                "prediction.probabilities must be a "
+                "torch.Tensor."
+            )
+
+        if not torch.isfinite(
+            prediction.trajectories,
+        ).all():
+
+            raise RuntimeError(
+                "prediction.trajectories contains NaN "
+                "or infinite values."
+            )
+
+        if not torch.isfinite(
+            prediction.probabilities,
+        ).all():
+
+            raise RuntimeError(
+                "prediction.probabilities contains NaN "
+                "or infinite values."
+            )
+
         #######################################################################
         # Proposal loss
         #
-        # Eq. (28):
+        # DSTNet proposal stage:
         #
         #     k_best = argmin endpoint error
         #
-        # Eq. (30):
-        #
-        #     L_proposal =
-        #         Huber(Y^(0)_kbest, G)
+        # followed by the proposal trajectory loss.
         #######################################################################
 
-        proposal_loss, best_mode = (
-            self.proposal_loss(
-                prediction,
-                ground_truth,
-                return_best_mode=True,
+        proposal_output = self.proposal_loss(
+            prediction,
+            ground_truth,
+            return_best_mode=True,
+        )
+
+        if not isinstance(
+            proposal_output,
+            tuple,
+        ):
+
+            raise TypeError(
+                "ProposalLoss must return "
+                "(loss, best_mode) when "
+                "return_best_mode=True."
             )
+
+        if len(proposal_output) != 2:
+
+            raise ValueError(
+                "ProposalLoss must return exactly "
+                "two values: (loss, best_mode)."
+            )
+
+        proposal_loss, best_mode = (
+            proposal_output
         )
 
         #######################################################################
         # Classification loss
-        #
-        # Eq. (32)
         #######################################################################
 
         classification_loss = (
@@ -278,58 +516,175 @@ class TotalLoss(nn.Module):
         )
 
         #######################################################################
-        # Refinement score loss
-        #
-        # Eq. (26) + Eq. (33)
-        #
-        # This must operate on RefinedPrediction because the required
-        # refinement trajectory and score histories are stored there.
+        # Refinement-dependent losses
         #######################################################################
 
-        score_loss = self.score_loss(
-            refined_prediction,
-            ground_truth,
-        )
+        refinement_metrics: dict[str, Tensor] = {}
 
-        #######################################################################
-        # Refined trajectory loss
-        #######################################################################
+        if self.refinement_enabled:
 
-        refinement_output = (
-            self.refinement_loss(
+            ###################################################################
+            # At this point refined_prediction is guaranteed to be non-None
+            # by the validation above.
+            ###################################################################
+
+            assert refined_prediction is not None
+
+            ###################################################################
+            # Score loss
+            ###################################################################
+
+            score_loss = self.score_loss(
                 refined_prediction,
                 ground_truth,
             )
-        )
 
-        if not isinstance(
-            refinement_output,
-            dict,
-        ):
-            raise TypeError(
-                "RefinementLoss must return a dictionary."
+            ###################################################################
+            # Refined trajectory loss
+            ###################################################################
+
+            refinement_output = (
+                self.refinement_loss(
+                    refined_prediction,
+                    ground_truth,
+                )
             )
 
-        if "loss" not in refinement_output:
-            raise KeyError(
-                "RefinementLoss output must contain "
-                "the key 'loss'."
+            if not isinstance(
+                refinement_output,
+                dict,
+            ):
+
+                raise TypeError(
+                    "RefinementLoss must return a dictionary."
+                )
+
+            if "loss" not in refinement_output:
+
+                raise KeyError(
+                    "RefinementLoss output must contain "
+                    "the key 'loss'."
+                )
+
+            refinement_loss = (
+                refinement_output["loss"]
             )
 
-        refinement_loss = (
-            refinement_output["loss"]
+            ###################################################################
+            # Preserve additional refinement metrics.
+            #
+            # IMPORTANT:
+            #
+            # Do not assume fields such as:
+            #
+            #     trajectory_history
+            #     refinement_score_history
+            #
+            # exist in RefinedPrediction.
+            #
+            # The current DSTNet contract contains:
+            #
+            #     trajectories
+            #     scores
+            #     offsets
+            ###################################################################
+
+            refinement_metrics = {
+                key: value
+                for key, value in refinement_output.items()
+                if key != "loss"
+            }
+
+        else:
+
+            ###################################################################
+            # Refinement disabled.
+            #
+            # DSTNet returns:
+            #
+            #     refined_prediction = None
+            #
+            # Therefore neither ScoreLoss nor RefinementLoss is evaluated.
+            ###################################################################
+
+            score_loss = self._zero_loss(
+                prediction.trajectories,
+            )
+
+            refinement_loss = self._zero_loss(
+                prediction.trajectories,
+            )
+
+        #######################################################################
+        # Validate individual losses
+        #######################################################################
+
+        self._validate_scalar_loss(
+            "proposal_loss",
+            proposal_loss,
         )
+
+        self._validate_scalar_loss(
+            "classification_loss",
+            classification_loss,
+        )
+
+        self._validate_scalar_loss(
+            "score_loss",
+            score_loss,
+        )
+
+        self._validate_scalar_loss(
+            "refinement_loss",
+            refinement_loss,
+        )
+
+        #######################################################################
+        # Validate refinement metrics
+        #######################################################################
+
+        for name, value in refinement_metrics.items():
+
+            if not isinstance(
+                value,
+                Tensor,
+            ):
+
+                raise TypeError(
+                    f"Refinement metric '{name}' must be "
+                    "a torch.Tensor."
+                )
+
+            if not torch.isfinite(
+                value,
+            ).all():
+
+                raise RuntimeError(
+                    f"Refinement metric '{name}' contains "
+                    "NaN or infinite values."
+                )
 
         #######################################################################
         # Weighted total objective
         #
-        # Default:
+        # Refinement enabled:
         #
         #     L_total =
         #         L_proposal
         #         + L_classification
         #         + L_refinement
         #         + 0.1 L_score
+        #
+        # Refinement disabled:
+        #
+        #     score_loss = 0
+        #     refinement_loss = 0
+        #
+        #     therefore:
+        #
+        #         L_total =
+        #             L_proposal
+        #             + L_classification
         #######################################################################
 
         total_loss = (
@@ -347,62 +702,31 @@ class TotalLoss(nn.Module):
         )
 
         #######################################################################
-        # Validate all scalar losses
+        # Validate total loss
         #######################################################################
 
-        components = {
-            "loss": total_loss,
-            "proposal_loss": proposal_loss,
-            "classification_loss": classification_loss,
-            "score_loss": score_loss,
-            "refinement_loss": refinement_loss,
-        }
-
-        for name, value in components.items():
-
-            if not isinstance(
-                value,
-                torch.Tensor,
-            ):
-                raise TypeError(
-                    f"{name} must be a torch.Tensor."
-                )
-
-            if value.ndim != 0:
-                raise ValueError(
-                    f"{name} must be scalar. "
-                    f"Got shape {tuple(value.shape)}."
-                )
-
-            if not torch.isfinite(
-                value,
-            ).all():
-                raise RuntimeError(
-                    f"{name} contains NaN or infinite values."
-                )
-
-        #######################################################################
-        # Include refinement metrics
-        #######################################################################
-
-        metrics = {
-            key: value
-            for key, value in refinement_output.items()
-            if key != "loss"
-        }
+        self._validate_scalar_loss(
+            "loss",
+            total_loss,
+        )
 
         #######################################################################
         # Final result
         #######################################################################
 
-        return {
+        result = {
             "loss": total_loss,
             "proposal_loss": proposal_loss,
             "classification_loss": classification_loss,
             "score_loss": score_loss,
             "refinement_loss": refinement_loss,
-            **metrics,
         }
+
+        result.update(
+            refinement_metrics,
+        )
+
+        return result
 
     ###########################################################################
     # Representation
@@ -417,9 +741,15 @@ class TotalLoss(nn.Module):
             f"proposal={self.proposal_weight}, "
             f"classification={self.classification_weight}, "
             f"score={self.score_weight}, "
-            f"refinement={self.refinement_weight})"
+            f"refinement={self.refinement_weight}, "
+            f"refinement_enabled="
+            f"{self.refinement_enabled})"
         )
 
+
+###############################################################################
+# Public API
+###############################################################################
 
 __all__ = [
     "TotalLoss",

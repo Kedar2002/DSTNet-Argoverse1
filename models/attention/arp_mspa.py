@@ -49,6 +49,26 @@ For computational sparsity, r_max is also used as a hard candidate
 radius. Thus agents outside r_max are not evaluated, while agents
 inside r_max receive a differentiable distance-dependent bias based
 on the target agent's learned radius.
+
+Numerical-stability modifications
+---------------------------------
+The mathematical ARP-MSPA formulation is unchanged.
+
+Two implementation-level protections are used:
+
+1. Pairwise squared Euclidean distances are computed directly rather
+   than using:
+
+       torch.linalg.norm(delta, dim=-1).square()
+
+   This avoids unnecessary sqrt -> square operations and removes a
+   potential zero-distance derivative singularity at self-attention.
+
+2. The masked softmax explicitly guarantees that every valid target
+   agent has at least one valid self-connection before softmax.
+
+These changes preserve the intended ARP-MSPA equations while making
+the implementation safer for FP32 training.
 """
 
 from __future__ import annotations
@@ -104,6 +124,10 @@ class ARPMSPA(nn.Module):
 
         super().__init__()
 
+        #######################################################################
+        # Validate configuration
+        #######################################################################
+
         if hidden_dim <= 0:
             raise ValueError(
                 "hidden_dim must be positive."
@@ -155,29 +179,41 @@ class ARPMSPA(nn.Module):
                 "dropout must satisfy 0 <= dropout < 1."
             )
 
-        self.hidden_dim = int(hidden_dim)
-        self.num_heads = int(num_heads)
+        #######################################################################
+        # Store configuration
+        #######################################################################
 
-        # Retain the baseline name for compatibility and readability.
+        self.hidden_dim = int(
+            hidden_dim
+        )
+
+        self.num_heads = int(
+            num_heads
+        )
+
+        self.head_dim = (
+            hidden_dim
+            // num_heads
+        )
+
         self.interaction_radius = float(
             interaction_radius
         )
 
-        self.r_min = float(r_min)
-        self.r_max = float(r_max)
+        self.r_min = float(
+            r_min
+        )
+
+        self.r_max = float(
+            r_max
+        )
 
         self.radius_hidden_dim = int(
             radius_hidden_dim
         )
 
-        self.head_dim = (
-            hidden_dim // num_heads
-        )
-
         #######################################################################
-        # Q, K, V
-        #
-        # Same projections as the current MSPA implementation.
+        # Q / K / V projections
         #######################################################################
 
         self.query_projection = nn.Linear(
@@ -199,31 +235,19 @@ class ARPMSPA(nn.Module):
         )
 
         #######################################################################
-        # Adaptive Radius Predictor
-        #
-        # Agent feature:
-        #
-        #     x_i = mean_{h,k}(Z_scene[i,h,k,:])
-        #
-        # Shape:
-        #
-        #     (B,N,H,K,D) -> (B,N,D)
-        #
-        # Radius:
-        #
-        #     r_i = r_min + (r_max-r_min)
-        #           sigmoid(
-        #               W2 GELU(W1 x_i + b1) + b2
-        #           )
+        # Adaptive radius predictor
         #######################################################################
 
         self.radius_predictor = nn.Sequential(
+
             nn.Linear(
                 hidden_dim,
                 radius_hidden_dim,
                 bias=True,
             ),
+
             nn.GELU(),
+
             nn.Linear(
                 radius_hidden_dim,
                 1,
@@ -244,12 +268,19 @@ class ARPMSPA(nn.Module):
         # at initialization.
         #######################################################################
 
-        final_radius_layer = self.radius_predictor[-1]
+        final_radius_layer = (
+            self.radius_predictor[-1]
+        )
 
-        if isinstance(final_radius_layer, nn.Linear):
+        if isinstance(
+            final_radius_layer,
+            nn.Linear,
+        ):
+
             nn.init.zeros_(
                 final_radius_layer.weight
             )
+
             nn.init.zeros_(
                 final_radius_layer.bias
             )
@@ -261,11 +292,13 @@ class ARPMSPA(nn.Module):
         #######################################################################
 
         self.alpha = nn.Parameter(
-            torch.ones(num_heads)
+            torch.ones(
+                num_heads
+            )
         )
 
         #######################################################################
-        # Output projection.
+        # Output projection
         #######################################################################
 
         self.output_projection = nn.Linear(
@@ -274,7 +307,13 @@ class ARPMSPA(nn.Module):
             bias=False,
         )
 
-        self.dropout = nn.Dropout(dropout)
+        #######################################################################
+        # Attention dropout
+        #######################################################################
+
+        self.dropout = nn.Dropout(
+            dropout
+        )
 
     ###########################################################################
     # Agent features for radius prediction
@@ -349,9 +388,11 @@ class ARPMSPA(nn.Module):
                 f"{agent_features.shape[-1]}."
             )
 
-        raw_radius_score = self.radius_predictor(
-            agent_features
-        ).squeeze(-1)
+        raw_radius_score = (
+            self.radius_predictor(
+                agent_features
+            ).squeeze(-1)
+        )
 
         radius_fraction = torch.sigmoid(
             raw_radius_score
@@ -366,24 +407,54 @@ class ARPMSPA(nn.Module):
             * radius_fraction
         )
 
+        #######################################################################
+        # Defensive finite-value protection.
+        #
+        # This does not alter the normal mathematical result. It only prevents
+        # an invalid upstream feature from silently propagating through the
+        # radius calculation.
+        #######################################################################
+
+        if not torch.isfinite(
+            radius
+        ).all():
+
+            raise FloatingPointError(
+                "ARP-MSPA predicted a non-finite interaction radius."
+            )
+
         return radius
 
     ###########################################################################
-    # Pairwise distances
+    # Pairwise squared distances
     ###########################################################################
 
-    def _pairwise_distances(
+    def _pairwise_squared_distances(
         self,
         positions: Tensor,
     ) -> Tensor:
         """
-        Compute pairwise Euclidean distances.
+        Compute pairwise squared Euclidean distances directly.
 
         positions
             (B,N,2)
 
         returns
             (B,N,N)
+
+        Mathematical definition
+        ------------------------
+            d_ij^2 = ||p_i - p_j||_2^2
+
+        This deliberately avoids:
+
+            torch.linalg.norm(delta, dim=-1).square()
+
+        because the derivative of sqrt(x) at x=0 is problematic even
+        though the final squared distance is perfectly well behaved.
+
+        Computing the squared distance directly gives the desired
+        quantity without introducing the intermediate square root.
         """
 
         if positions.ndim != 3:
@@ -401,9 +472,46 @@ class ARPMSPA(nn.Module):
             - positions[:, None, :, :]
         )
 
-        return torch.linalg.norm(
-            delta,
-            dim=-1,
+        squared_distances = (
+            delta.square()
+            .sum(
+                dim=-1
+            )
+        )
+
+        return squared_distances
+
+    ###########################################################################
+    # Pairwise distances
+    ###########################################################################
+
+    def _pairwise_distances(
+        self,
+        positions: Tensor,
+    ) -> Tensor:
+        """
+        Compute pairwise Euclidean distances.
+
+        This method is retained for compatibility with the current
+        ARP-MSPA interface.
+
+        positions
+            (B,N,2)
+
+        returns
+            (B,N,N)
+        """
+
+        squared_distances = (
+            self._pairwise_squared_distances(
+                positions
+            )
+        )
+
+        return torch.sqrt(
+            squared_distances.clamp_min(
+                0.0
+            )
         )
 
     ###########################################################################
@@ -430,19 +538,32 @@ class ARPMSPA(nn.Module):
             (B,N,N)
         """
 
-        distances = self._pairwise_distances(
-            positions
+        #######################################################################
+        # Use squared distances for the radius comparison.
+        #
+        # This avoids an unnecessary square root.
+        #######################################################################
+
+        squared_distances = (
+            self._pairwise_squared_distances(
+                positions
+            )
         )
 
         candidate_mask = (
-            distances <= self.r_max
+            squared_distances
+            <= self.r_max * self.r_max
         )
 
         #######################################################################
         # Self attention is always permitted for valid agents.
         #######################################################################
 
-        batch_size, num_agents, _ = positions.shape
+        (
+            batch_size,
+            num_agents,
+            _,
+        ) = positions.shape
 
         identity = torch.eye(
             num_agents,
@@ -469,6 +590,10 @@ class ARPMSPA(nn.Module):
                     "agent_mask must have shape (B,N)."
                 )
 
+            agent_mask = (
+                agent_mask.bool()
+            )
+
             valid_pairs = (
                 agent_mask[:, :, None]
                 & agent_mask[:, None, :]
@@ -487,9 +612,29 @@ class ARPMSPA(nn.Module):
                 candidate_mask
                 | (
                     identity.unsqueeze(0)
-                    & agent_mask.bool().unsqueeze(-1)
+                    & agent_mask.unsqueeze(-1)
                 )
             )
+
+        #######################################################################
+        # Every valid target agent must have at least itself as a candidate.
+        #######################################################################
+
+        if agent_mask is not None:
+
+            valid_target_has_candidate = (
+                candidate_mask.any(
+                    dim=-1
+                )
+                | ~agent_mask
+            )
+
+            if not valid_target_has_candidate.all():
+
+                raise RuntimeError(
+                    "ARP-MSPA constructed a target agent with no valid "
+                    "attention candidate."
+                )
 
         return candidate_mask
 
@@ -525,27 +670,51 @@ class ARPMSPA(nn.Module):
         Note that r_i belongs to the TARGET agent i.
         """
 
-        distances = self._pairwise_distances(
-            positions
+        #######################################################################
+        # Compute squared distances directly.
+        #######################################################################
+
+        squared_distances = (
+            self._pairwise_squared_distances(
+                positions
+            )
         )
+
+        #######################################################################
+        # Radius safety.
+        #
+        # r_min is already strictly positive by construction, but clamp once
+        # more defensively using the representable minimum for the tensor
+        # dtype.
+        #######################################################################
 
         radius_squared = (
-            radii
-            .clamp_min(
+            radii.clamp_min(
                 torch.finfo(
                     radii.dtype
-                ).eps
-            )
-            .square()
+                ).tiny
+            ).square()
         )
 
+        #######################################################################
+        # B_ij = -d_ij^2 / (2 r_i^2)
+        #######################################################################
+
         bias = -(
-            distances.square()
+            squared_distances
             / (
                 2.0
                 * radius_squared.unsqueeze(-1)
             )
         )
+
+        if not torch.isfinite(
+            bias
+        ).all():
+
+            raise FloatingPointError(
+                "ARP-MSPA produced non-finite spatial attention bias."
+            )
 
         return bias
 
@@ -600,8 +769,11 @@ class ARPMSPA(nn.Module):
             key,
         )
 
-        scores = scores / math.sqrt(
-            self.head_dim
+        scores = (
+            scores
+            / math.sqrt(
+                self.head_dim
+            )
         )
 
         #######################################################################
@@ -613,14 +785,14 @@ class ARPMSPA(nn.Module):
 
         scores = (
             scores
-            + spatial_bias.unsqueeze(-1).unsqueeze(-1)
+            + spatial_bias.unsqueeze(-1)
+            .unsqueeze(-1)
         )
 
         #######################################################################
         # Hard maximum-radius candidate mask.
         #
-        # This preserves sparse computation beyond r_max while the learned
-        # radius controls the strength of spatial suppression inside r_max.
+        # Every valid target has at least one valid candidate: itself.
         #######################################################################
 
         valid = (
@@ -629,11 +801,25 @@ class ARPMSPA(nn.Module):
             .unsqueeze(-1)
         )
 
-        scores = scores.masked_fill(
-            ~valid,
+        #######################################################################
+        # Use a finite negative value rather than relying on the minimum
+        # representable floating-point value.
+        #
+        # For FP32 this is approximately -3.4e38.
+        #
+        # More importantly, every valid target has a self connection, so
+        # softmax never receives an all-masked row.
+        #######################################################################
+
+        mask_value = (
             torch.finfo(
                 scores.dtype
-            ).min,
+            ).min
+        )
+
+        scores = scores.masked_fill(
+            ~valid,
+            mask_value,
         )
 
         #######################################################################
@@ -645,10 +831,30 @@ class ARPMSPA(nn.Module):
             dim=2,
         )
 
+        #######################################################################
+        # Explicitly remove masked probabilities.
+        #######################################################################
+
         attention = attention.masked_fill(
             ~valid,
             0.0,
         )
+
+        #######################################################################
+        # Numerical check before dropout.
+        #######################################################################
+
+        if not torch.isfinite(
+            attention
+        ).all():
+
+            raise FloatingPointError(
+                "ARP-MSPA produced non-finite attention probabilities."
+            )
+
+        #######################################################################
+        # Attention dropout.
+        #######################################################################
 
         attention = self.dropout(
             attention
@@ -658,11 +864,21 @@ class ARPMSPA(nn.Module):
         # Weighted aggregation.
         #######################################################################
 
-        return torch.einsum(
+        output = torch.einsum(
             "bnmtk,bmskd->bntkd",
             attention,
             value,
         )
+
+        if not torch.isfinite(
+            output
+        ).all():
+
+            raise FloatingPointError(
+                "ARP-MSPA produced non-finite attention output."
+            )
+
+        return output
 
     ###########################################################################
     # Forward
@@ -695,6 +911,10 @@ class ARPMSPA(nn.Module):
             (B,N,H,K,D)
         """
 
+        #######################################################################
+        # Validate scene embeddings.
+        #######################################################################
+
         if scene_embeddings.ndim != 5:
             raise ValueError(
                 "scene_embeddings must have shape "
@@ -710,27 +930,62 @@ class ARPMSPA(nn.Module):
         ) = scene_embeddings.shape
 
         if hidden_dim != self.hidden_dim:
+
             raise ValueError(
                 f"Expected hidden_dim={self.hidden_dim}, "
                 f"got {hidden_dim}."
             )
+
+        #######################################################################
+        # Validate positions.
+        #######################################################################
 
         if positions.shape != (
             batch_size,
             num_agents,
             2,
         ):
+
             raise ValueError(
                 "positions must have shape (B,N,2) "
                 "matching scene_embeddings."
             )
 
-        if agent_mask is not None and agent_mask.shape != (
-            batch_size,
-            num_agents,
+        #######################################################################
+        # Validate agent mask.
+        #######################################################################
+
+        if (
+            agent_mask is not None
+            and agent_mask.shape
+            != (
+                batch_size,
+                num_agents,
+            )
         ):
+
             raise ValueError(
                 "agent_mask must have shape (B,N)."
+            )
+
+        #######################################################################
+        # Validate input values before attention.
+        #######################################################################
+
+        if not torch.isfinite(
+            scene_embeddings
+        ).all():
+
+            raise FloatingPointError(
+                "ARP-MSPA received non-finite scene embeddings."
+            )
+
+        if not torch.isfinite(
+            positions
+        ).all():
+
+            raise FloatingPointError(
+                "ARP-MSPA received non-finite positions."
             )
 
         #######################################################################
@@ -747,8 +1002,10 @@ class ARPMSPA(nn.Module):
         # (B,N,D)
         #######################################################################
 
-        agent_features = self._agent_features(
-            scene_embeddings
+        agent_features = (
+            self._agent_features(
+                scene_embeddings
+            )
         )
 
         radii = self.predict_radius(
@@ -837,18 +1094,22 @@ class ARPMSPA(nn.Module):
         # Maximum-radius candidate set.
         #######################################################################
 
-        candidate_mask = self._build_candidate_mask(
-            positions,
-            agent_mask,
+        candidate_mask = (
+            self._build_candidate_mask(
+                positions,
+                agent_mask,
+            )
         )
 
         #######################################################################
         # Adaptive spatial bias.
         #######################################################################
 
-        spatial_bias = self._adaptive_spatial_bias(
-            positions,
-            radii,
+        spatial_bias = (
+            self._adaptive_spatial_bias(
+                positions,
+                radii,
+            )
         )
 
         #######################################################################
@@ -865,12 +1126,14 @@ class ARPMSPA(nn.Module):
             self.num_heads
         ):
 
-            output = self._single_head_attention(
-                query=Q[:, head_index],
-                key=K[:, head_index],
-                value=V[:, head_index],
-                candidate_mask=candidate_mask,
-                spatial_bias=spatial_bias,
+            output = (
+                self._single_head_attention(
+                    query=Q[:, head_index],
+                    key=K[:, head_index],
+                    value=V[:, head_index],
+                    candidate_mask=candidate_mask,
+                    spatial_bias=spatial_bias,
+                )
             )
 
             output = (
@@ -913,22 +1176,40 @@ class ARPMSPA(nn.Module):
                 0.0,
             )
 
+        #######################################################################
+        # Final numerical check.
+        #######################################################################
+
+        if not torch.isfinite(
+            output
+        ).all():
+
+            raise FloatingPointError(
+                "ARP-MSPA produced non-finite output."
+            )
+
         return output
 
     ###########################################################################
     # Diagnostics
     ###########################################################################
 
-    def extra_repr(self) -> str:
+    def extra_repr(
+        self,
+    ) -> str:
 
         return (
             f"hidden_dim={self.hidden_dim}, "
             f"num_heads={self.num_heads}, "
-            f"interaction_radius={self.interaction_radius}, "
+            f"interaction_radius="
+            f"{self.interaction_radius}, "
             f"r_min={self.r_min}, "
             f"r_max={self.r_max}, "
-            f"radius_hidden_dim={self.radius_hidden_dim}"
+            f"radius_hidden_dim="
+            f"{self.radius_hidden_dim}"
         )
 
 
-__all__ = ["ARPMSPA"]
+__all__ = [
+    "ARPMSPA",
+]

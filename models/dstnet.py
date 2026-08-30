@@ -74,6 +74,11 @@ In particular:
        offsets:
            (B, N, H, K, T, 2)
 
+7. Refinement can be disabled for memory/stability testing. When
+   refinement is disabled, the model returns ``None`` for the refined
+   prediction and does not attempt to validate or access refinement
+   outputs.
+
 The top-level model therefore acts only as the composition layer.
 It does not duplicate architectural operations already implemented
 inside Encoder, Decoder, or Refinement.
@@ -134,6 +139,18 @@ class DSTNet(nn.Module):
     refinement_iterations:
         Number of refinement cycles.
 
+    r_min:
+        Minimum adaptive interaction radius.
+
+    r_max:
+        Maximum adaptive interaction radius.
+
+    radius_hidden_dim:
+        Hidden dimension used by the adaptive-radius predictor.
+
+    refinement_enabled:
+        Whether anchor-based trajectory refinement is enabled.
+
     dropout:
         Dropout probability used by the learnable modules.
     """
@@ -152,6 +169,7 @@ class DSTNet(nn.Module):
         r_min: float = 5.0,
         r_max: float | None = None,
         radius_hidden_dim: int | None = None,
+        refinement_enabled: bool = True,
         dropout: float = 0.1,
     ) -> None:
 
@@ -186,6 +204,11 @@ class DSTNet(nn.Module):
                 "num_heads must be positive."
             )
 
+        if hidden_dim % num_heads != 0:
+            raise ValueError(
+                "hidden_dim must be divisible by num_heads."
+            )
+
         if num_encoder_layers <= 0:
             raise ValueError(
                 "num_encoder_layers must be positive."
@@ -206,9 +229,32 @@ class DSTNet(nn.Module):
                 "refinement_iterations must be positive."
             )
 
+        if r_min <= 0.0:
+            raise ValueError(
+                "r_min must be positive."
+            )
+
+        if r_max is not None and r_max <= r_min:
+            raise ValueError(
+                "r_max must be greater than r_min."
+            )
+
+        if radius_hidden_dim is not None and radius_hidden_dim <= 0:
+            raise ValueError(
+                "radius_hidden_dim must be positive when provided."
+            )
+
         if not 0.0 <= dropout < 1.0:
             raise ValueError(
                 "dropout must satisfy 0 <= dropout < 1."
+            )
+
+        if not isinstance(
+            refinement_enabled,
+            bool,
+        ):
+            raise TypeError(
+                "refinement_enabled must be a bool."
             )
 
         #######################################################################
@@ -227,6 +273,7 @@ class DSTNet(nn.Module):
         self.r_min = r_min
         self.r_max = r_max
         self.radius_hidden_dim = radius_hidden_dim
+        self.refinement_enabled = refinement_enabled
         self.dropout = dropout
 
         #######################################################################
@@ -295,13 +342,19 @@ class DSTNet(nn.Module):
         # Anchor-Based Refinement
         #######################################################################
 
-        self.refinement = Refinement(
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            prediction_steps=prediction_steps,
-            refinement_iterations=refinement_iterations,
-            dropout=dropout,
-        )
+        if self.refinement_enabled:
+
+            self.refinement = Refinement(
+                hidden_dim=hidden_dim,
+                num_heads=num_heads,
+                prediction_steps=prediction_steps,
+                refinement_iterations=refinement_iterations,
+                dropout=dropout,
+            )
+
+        else:
+
+            self.refinement = None
 
     ###########################################################################
     # Forward
@@ -318,7 +371,7 @@ class DSTNet(nn.Module):
         map_mask: Tensor | None = None,
     ) -> tuple[
         Prediction,
-        RefinedPrediction,
+        RefinedPrediction | None,
     ]:
         """
         Run the complete DSTNet forward pass.
@@ -365,7 +418,7 @@ class DSTNet(nn.Module):
 
         Returns
         -------
-        tuple[Prediction, RefinedPrediction]
+        tuple[Prediction, RefinedPrediction | None]
 
             coarse_prediction:
                 Decoder output containing coarse multimodal
@@ -373,7 +426,9 @@ class DSTNet(nn.Module):
 
             refined_prediction:
                 Final anchor-refined trajectories, scores,
-                and offsets.
+                and offsets when refinement is enabled.
+
+                ``None`` when refinement is disabled.
         """
 
         #######################################################################
@@ -425,6 +480,30 @@ class DSTNet(nn.Module):
                 f"got {tuple(positions.shape)}."
             )
 
+        if agent_trajectories.shape[0] != map_centerlines.shape[0]:
+            raise ValueError(
+                "Batch dimension mismatch between "
+                "agent_trajectories and map_centerlines: "
+                f"{agent_trajectories.shape[0]} vs "
+                f"{map_centerlines.shape[0]}."
+            )
+
+        if agent_trajectories.shape[0] != positions.shape[0]:
+            raise ValueError(
+                "Batch dimension mismatch between "
+                "agent_trajectories and positions: "
+                f"{agent_trajectories.shape[0]} vs "
+                f"{positions.shape[0]}."
+            )
+
+        if agent_trajectories.shape[1] != positions.shape[1]:
+            raise ValueError(
+                "Agent dimension mismatch between "
+                "agent_trajectories and positions: "
+                f"{agent_trajectories.shape[1]} vs "
+                f"{positions.shape[1]}."
+            )
+
         #######################################################################
         # Local feature extraction
         #######################################################################
@@ -466,7 +545,7 @@ class DSTNet(nn.Module):
         # Defensive shape validation
         #######################################################################
 
-        expected_shape_prefix = (
+        expected_shape = (
             agent_trajectories.shape[0],
             agent_trajectories.shape[1],
             agent_trajectories.shape[2],
@@ -474,15 +553,15 @@ class DSTNet(nn.Module):
             self.hidden_dim,
         )
 
-        if tuple(z_stm.shape) != expected_shape_prefix:
+        if tuple(z_stm.shape) != expected_shape:
             raise RuntimeError(
                 "Encoder produced an unexpected Z_STM shape: "
-                f"expected {expected_shape_prefix}, "
+                f"expected {expected_shape}, "
                 f"got {tuple(z_stm.shape)}."
             )
 
         if not torch.isfinite(
-            z_stm,
+            z_stm
         ).all():
             raise FloatingPointError(
                 "Encoder produced NaN or infinite values."
@@ -505,60 +584,75 @@ class DSTNet(nn.Module):
         )
 
         #######################################################################
-        # Anchor-based trajectory refinement
-        #
-        #     Z_STM + Prediction
-        #              |
-        #              v
-        #         Refinement
-        #              |
-        #              v
-        #      RefinedPrediction
-        #######################################################################
-
-        refined_prediction = self.refinement(
-            z_stm=z_stm,
-            prediction=coarse_prediction,
-        )
-
-        #######################################################################
-        # Final validation
+        # Coarse prediction validation
         #######################################################################
 
         if not torch.isfinite(
-            coarse_prediction.trajectories,
+            coarse_prediction.trajectories
         ).all():
             raise FloatingPointError(
                 "Decoder produced non-finite trajectories."
             )
 
         if not torch.isfinite(
-            coarse_prediction.probabilities,
+            coarse_prediction.probabilities
         ).all():
             raise FloatingPointError(
                 "Decoder produced non-finite probabilities."
             )
 
-        if not torch.isfinite(
-            refined_prediction.trajectories,
-        ).all():
-            raise FloatingPointError(
-                "Refinement produced non-finite trajectories."
+        #######################################################################
+        # Anchor-based trajectory refinement
+        #
+        # Refinement is deliberately isolated behind the
+        # refinement_enabled flag.
+        #
+        # This allows the training pipeline to disable refinement
+        # while diagnosing Encoder/GSTA/ARP-MSPA numerical stability
+        # and GPU memory usage.
+        #######################################################################
+
+        if self.refinement_enabled:
+
+            if self.refinement is None:
+                raise RuntimeError(
+                    "refinement_enabled=True but the Refinement "
+                    "module was not constructed."
+                )
+
+            refined_prediction = self.refinement(
+                z_stm=z_stm,
+                prediction=coarse_prediction,
             )
 
-        if not torch.isfinite(
-            refined_prediction.scores,
-        ).all():
-            raise FloatingPointError(
-                "Refinement produced non-finite scores."
-            )
+            ###################################################################
+            # Refined prediction validation
+            ###################################################################
 
-        if not torch.isfinite(
-            refined_prediction.offsets,
-        ).all():
-            raise FloatingPointError(
-                "Refinement produced non-finite offsets."
-            )
+            if not torch.isfinite(
+                refined_prediction.trajectories
+            ).all():
+                raise FloatingPointError(
+                    "Refinement produced non-finite trajectories."
+                )
+
+            if not torch.isfinite(
+                refined_prediction.scores
+            ).all():
+                raise FloatingPointError(
+                    "Refinement produced non-finite scores."
+                )
+
+            if not torch.isfinite(
+                refined_prediction.offsets
+            ).all():
+                raise FloatingPointError(
+                    "Refinement produced non-finite offsets."
+                )
+
+        else:
+
+            refined_prediction = None
 
         #######################################################################
         # Return
@@ -587,7 +681,9 @@ class DSTNet(nn.Module):
             f"num_modes={self.num_modes}, "
             f"interaction_radius={self.interaction_radius}, "
             f"refinement_iterations="
-            f"{self.refinement_iterations}"
+            f"{self.refinement_iterations}, "
+            f"refinement_enabled="
+            f"{self.refinement_enabled}"
         )
 
 

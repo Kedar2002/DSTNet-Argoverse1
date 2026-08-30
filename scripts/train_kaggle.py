@@ -49,6 +49,13 @@ import sys
 import time
 from pathlib import Path
 
+import os
+
+os.environ.setdefault(
+    "PYTORCH_ALLOC_CONF",
+    "expandable_segments:True",
+)
+
 import torch
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
@@ -228,9 +235,9 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 
-BATCH_SIZE = 4
+BATCH_SIZE = 3
 
-NUM_WORKERS = 4
+NUM_WORKERS = 2
 
 EPOCHS = 30
 
@@ -244,13 +251,15 @@ GRADIENT_CLIP = 0.5
 
 VALIDATE_EVERY = 5
 
+REFINEMENT_ENABLED = False
+
 ###############################################################################
 # Mixed Precision
 ###############################################################################
 
-USE_AMP = True
+USE_AMP = False
 
-AMP_DTYPE = torch.float16
+AMP_DTYPE = torch.float32
 
 
 # Printing every 10 batches is unnecessarily expensive
@@ -488,7 +497,9 @@ def build_model() -> DSTNet:
     signature.
     """
 
-    model = DSTNet()
+    model = DSTNet(
+        refinement_enabled=REFINEMENT_ENABLED,
+    )
 
     model.to(
         DEVICE,
@@ -553,7 +564,9 @@ def build_training_components(
         ),
     )
 
-    criterion = TotalLoss()
+    criterion = TotalLoss(
+        refinement_enabled=REFINEMENT_ENABLED,
+    )
 
     return (
         optimizer,
