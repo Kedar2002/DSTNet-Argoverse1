@@ -226,11 +226,11 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 
-BATCH_SIZE = 8
+BATCH_SIZE = 4
 
 NUM_WORKERS = 2
 
-EPOCHS = 50
+EPOCHS = 60
 
 LEARNING_RATE = 1e-4
 
