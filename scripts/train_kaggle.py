@@ -248,7 +248,7 @@ VALIDATE_EVERY = 5
 # Mixed Precision
 ###############################################################################
 
-USE_AMP = True
+USE_AMP = False
 
 AMP_DTYPE = torch.bfloat16
 
@@ -1155,29 +1155,37 @@ def train_one_epoch(
     """
     Train DSTNet for one complete epoch.
 
-    Uses CUDA automatic mixed precision when available.
+    Uses:
+      - optional CUDA AMP
+      - explicit finite-value checks
+      - gradient clipping
+      - safe handling of non-finite gradients
+      - reduced logging frequency
+
+    IMPORTANT:
+    When USE_AMP=False, training is performed entirely in FP32 and
+    GradScaler is bypassed.
     """
 
     model.train()
 
     running_loss = 0.0
 
-    num_batches = len(
-        dataloader
-    )
+    num_batches = len(dataloader)
 
-    epoch_start = (
-        time.perf_counter()
-    )
+    if num_batches == 0:
+        raise RuntimeError(
+            "Training DataLoader contains zero batches."
+        )
+
+    epoch_start = time.perf_counter()
 
     for batch_index, batch in enumerate(
         dataloader,
         start=1,
     ):
 
-        batch_start = (
-            time.perf_counter()
-        )
+        batch_start = time.perf_counter()
 
         #######################################################################
         # Move batch to device
@@ -1189,7 +1197,7 @@ def train_one_epoch(
         )
 
         #######################################################################
-        # Optimizer
+        # Clear gradients
         #######################################################################
 
         optimizer.zero_grad(
@@ -1197,18 +1205,69 @@ def train_one_epoch(
         )
 
         #######################################################################
-        # Mixed-precision forward + loss
+        # Forward + loss
         #######################################################################
 
-        with autocast(
-            device_type=DEVICE.type,
-            dtype=(
-                AMP_DTYPE
-                if USE_AMP
-                else torch.float32
-            ),
-            enabled=USE_AMP,
-        ):
+        if USE_AMP:
+
+            with autocast(
+                device_type=DEVICE.type,
+                dtype=AMP_DTYPE,
+                enabled=True,
+            ):
+
+                (
+                    coarse_prediction,
+                    refined_prediction,
+                ) = model(
+
+                    agent_trajectories=(
+                        batch["agent_trajectories"]
+                    ),
+
+                    map_centerlines=(
+                        batch["map_centerlines"]
+                    ),
+
+                    positions=(
+                        batch["positions"]
+                    ),
+
+                    graph=(
+                        batch["graph"]
+                    ),
+
+                    agent_mask=batch.get(
+                        "agent_mask"
+                    ),
+
+                    map_mask=batch.get(
+                        "map_mask"
+                    ),
+                )
+
+                losses = criterion(
+
+                    prediction=(
+                        coarse_prediction
+                    ),
+
+                    refined_prediction=(
+                        refined_prediction
+                    ),
+
+                    ground_truth=(
+                        batch["future_trajectories"]
+                    ),
+                )
+
+                loss = losses["loss"]
+
+        else:
+
+            # ---------------------------------------------------------------
+            # Pure FP32 path
+            # ---------------------------------------------------------------
 
             (
                 coarse_prediction,
@@ -1216,27 +1275,19 @@ def train_one_epoch(
             ) = model(
 
                 agent_trajectories=(
-                    batch[
-                        "agent_trajectories"
-                    ]
+                    batch["agent_trajectories"]
                 ),
 
                 map_centerlines=(
-                    batch[
-                        "map_centerlines"
-                    ]
+                    batch["map_centerlines"]
                 ),
 
                 positions=(
-                    batch[
-                        "positions"
-                    ]
+                    batch["positions"]
                 ),
 
                 graph=(
-                    batch[
-                        "graph"
-                    ]
+                    batch["graph"]
                 ),
 
                 agent_mask=batch.get(
@@ -1259,66 +1310,111 @@ def train_one_epoch(
                 ),
 
                 ground_truth=(
-                    batch[
-                        "future_trajectories"
-                    ]
+                    batch["future_trajectories"]
                 ),
             )
 
-            loss = losses[
-                "loss"
-            ]
+            loss = losses["loss"]
 
         #######################################################################
-        # Numerical sanity check
+        # Loss sanity check
         #######################################################################
 
-        if not torch.isfinite(
-            loss
-        ).all():
+        if not torch.isfinite(loss).all():
 
-            raise RuntimeError(
+            print()
+            print("=" * 80)
+            print("NON-FINITE LOSS DETECTED")
+            print("=" * 80)
+            print(
+                f"Epoch : {epoch}"
+            )
+            print(
+                f"Batch : {batch_index}"
+            )
+            print(
+                f"Loss  : {loss.detach().item()}"
+            )
 
-                f"Non-finite loss at "
-                f"epoch {epoch}, "
-                f"batch {batch_index}."
+            raise FloatingPointError(
+                "Non-finite loss detected."
             )
 
         #######################################################################
-        # Scaled backward
+        # Backward
         #######################################################################
 
-        scaler.scale(
-            loss
-        ).backward()
+        if USE_AMP:
+
+            scaler.scale(
+                loss
+            ).backward()
+
+            scaler.unscale_(
+                optimizer
+            )
+
+        else:
+
+            loss.backward()
 
         #######################################################################
-        # Unscale before gradient clipping
+        # Gradient diagnostics
         #######################################################################
 
-        scaler.unscale_(
-            optimizer
-        )
-
-        # ------------------------------------------------------------------
-        # Gradient finite-value check
-        # ------------------------------------------------------------------
         nonfinite_gradients = []
 
+        max_gradient_value = 0.0
+
         for name, parameter in model.named_parameters():
-            if parameter.grad is not None:
-                if not torch.isfinite(parameter.grad).all():
-                    nonfinite_gradients.append(name)
+
+            if parameter.grad is None:
+                continue
+
+            gradient = parameter.grad
+
+            if not torch.isfinite(
+                gradient
+            ).all():
+
+                nonfinite_gradients.append(
+                    name
+                )
+
+                continue
+
+            current_max = (
+                gradient.detach()
+                .abs()
+                .max()
+                .item()
+            )
+
+            max_gradient_value = max(
+                max_gradient_value,
+                current_max,
+            )
+
+        #######################################################################
+        # Abort before optimizer update if gradients are invalid
+        #######################################################################
 
         if nonfinite_gradients:
-            print("\n" + "=" * 80)
+
+            print()
+            print("=" * 80)
             print("NON-FINITE GRADIENT DETECTED")
             print("=" * 80)
 
-            print(f"Number of affected parameters: {len(nonfinite_gradients)}")
+            print(
+                f"Number of affected parameters: "
+                f"{len(nonfinite_gradients)}"
+            )
 
             for name in nonfinite_gradients[:20]:
-                print(f"  {name}")
+                print(
+                    f"  {name}"
+                )
 
             if len(nonfinite_gradients) > 20:
                 print(
@@ -1326,28 +1422,50 @@ def train_one_epoch(
                     f"{len(nonfinite_gradients) - 20} more"
                 )
 
-            raise FloatingPointError(
-                "Non-finite gradients detected before gradient clipping."
+            print()
+            print(
+                f"Epoch : {epoch}"
+            )
+            print(
+                f"Batch : {batch_index}"
+            )
+            print(
+                f"Loss  : "
+                f"{loss.detach().item():.8f}"
             )
 
-        # ------------------------------------------------------------------
+            raise FloatingPointError(
+                "Non-finite gradients detected "
+                "before gradient clipping."
+            )
+
+        #######################################################################
         # Gradient clipping
-        # ------------------------------------------------------------------
-        gradient_norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(),
-            max_norm=1.0,
-            error_if_nonfinite=True,
+        #######################################################################
+
+        gradient_norm = (
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=1.0,
+                error_if_nonfinite=True,
+            )
         )
 
         #######################################################################
-        # Optimizer
+        # Optimizer update
         #######################################################################
 
-        scaler.step(
-            optimizer
-        )
+        if USE_AMP:
 
-        scaler.update()
+            scaler.step(
+                optimizer
+            )
+
+            scaler.update()
+
+        else:
+
+            optimizer.step()
 
         #######################################################################
         # Scheduler
@@ -1361,9 +1479,11 @@ def train_one_epoch(
         # Statistics
         #######################################################################
 
-        running_loss += (
+        loss_value = (
             loss.detach().item()
         )
+
+        running_loss += loss_value
 
         batch_time = (
             time.perf_counter()
@@ -1371,7 +1491,7 @@ def train_one_epoch(
         )
 
         #######################################################################
-        # Reduced logging frequency
+        # Logging
         #######################################################################
 
         if (
@@ -1387,27 +1507,19 @@ def train_one_epoch(
                 f"[{batch_index:06d}/"
                 f"{num_batches:06d}] "
 
-                f"loss={loss.detach().item():.6f} "
+                f"loss={loss_value:.6f} "
 
                 f"grad={float(gradient_norm):.4f} "
+
+                f"maxgrad={max_gradient_value:.4e} "
 
                 f"lr="
                 f"{optimizer.param_groups[0]['lr']:.8e} "
 
-                f"time={batch_time:.2f}s"
+                f"time={batch_time:.2f}s",
+
+                flush=True,
             )
-
-    ###########################################################################
-    # Empty loader check
-    ###########################################################################
-
-    if num_batches == 0:
-
-        raise RuntimeError(
-
-            "Training DataLoader contains "
-            "zero batches."
-        )
 
     ###########################################################################
     # Epoch statistics
@@ -1427,12 +1539,14 @@ def train_one_epoch(
 
     print(
         f"Training Epoch {epoch} "
-        f"Loss : {average_loss:.6f}"
+        f"Loss : {average_loss:.6f}",
+        flush=True,
     )
 
     print(
         f"Training Epoch Time : "
-        f"{epoch_time:.2f} s"
+        f"{epoch_time:.2f} s",
+        flush=True,
     )
 
     return average_loss
