@@ -5,51 +5,90 @@ Kaggle training entry point for the current DSTNet implementation.
 
 Purpose
 -------
-Runs production-style training on the Kaggle Argoverse-1 dataset while
-keeping Kaggle-specific paths in this file.
+Runs production-style training on the Kaggle Argoverse-1 dataset.
 
-Current model/data terminology
-------------------------------
-The training batch uses:
+The training dataset is already preprocessed into SceneData cache files.
+The Kaggle cache is composed from:
+
+    1. The original uploaded cache dataset containing the existing
+       preprocessed scenes.
+
+    2. The newly generated cache archive containing the remaining
+       preprocessed scenes.
+
+The two cache sources are NOT copied into one giant directory.
+
+Instead:
+
+    - the new cache archive is extracted into /kaggle/working
+    - the original uploaded cache remains read-only under /kaggle/input
+    - CombinedCacheManager searches both locations
+
+This avoids unnecessarily copying ~129,000 existing cache files.
+
+Current data terminology
+------------------------
+The current collate pipeline provides:
 
     agent_trajectories
     future_trajectories
     map_centerlines
     positions
+    headings
     agent_mask
     map_mask
     graph
 
-``headings`` remains available in the dataset/scene representation but is
-not passed as a separate argument to the current DSTNet forward interface.
-
 Checkpointing
 -------------
-A full local checkpoint is written every epoch.
+A complete local checkpoint is written every epoch.
 
-An optional external backup path is provided below. Once that path is
-changed to a persistent mounted location, the script copies a complete
-checkpoint there every ``EXTERNAL_SAVE_EVERY`` epochs.
-
-The external backup is intentionally disabled until the path is configured.
+An optional external backup path is provided below.
 
 Cache
 -----
-The dataset cache is stored under ``CACHE_ROOT`` by default. The
-``CacheManager`` stores each processed ``SceneData`` as a pickle file, so
-the cache directory can also be pointed at a persistent mounted path or
-copied/downloaded as an artifact after training.
+The cache contains processed SceneData objects saved by CacheManager
+as pickle files.
+
+The original cache is read directly from Kaggle input.
+
+The additional cache is extracted from its archive into Kaggle working
+storage.
+
+DSTNet Reference
+----------------
+This runner follows the current project implementation of DSTNet:
+
+    Raw Argoverse scene
+        -> SceneParser
+        -> Transform
+        -> ScenePreprocessor
+        -> SceneData
+        -> CacheManager
+        -> ArgoverseDataset
+        -> collate_fn
+        -> DSTNet
+
+The architecture follows the DSTNet paper:
+
+    "DSTNet: Dynamic Trajectory Prediction for Autonomous Vehicles
+     via Spatio-Temporal Attention"
+
+The paper describes the dynamic spatio-temporal attention backbone,
+multi-scale spatial/historical attention, multimodal interaction,
+and anchor-based trajectory refinement.
 """
 
 from __future__ import annotations
 
 import csv
+import os
+import pickle
 import shutil
 import sys
+import tarfile
 import time
 from pathlib import Path
-
-import os
 
 os.environ.setdefault(
     "PYTORCH_ALLOC_CONF",
@@ -57,8 +96,8 @@ os.environ.setdefault(
 )
 
 import torch
-from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
+from torch.amp.grad_scaler import GradScaler
 from torch.utils.data import DataLoader
 
 
@@ -66,9 +105,9 @@ from torch.utils.data import DataLoader
 # Repository Root
 ###############################################################################
 
-PROJECT_ROOT = Path(
-    __file__
-).resolve().parents[1]
+PROJECT_ROOT = (
+    Path(__file__).resolve().parents[1]
+)
 
 if str(PROJECT_ROOT) not in sys.path:
 
@@ -133,50 +172,80 @@ MAP_ROOT = Path(
 
 
 ###############################################################################
+# Published Cache Dataset
+###############################################################################
+
+#
+# This is the existing Kaggle dataset containing the original cache.
+#
+# It currently contains approximately 129,707 preprocessed scenes.
+#
+###############################################################################
+
+PUBLISHED_CACHE_ROOT = Path(
+    "/kaggle/input/datasets/kedaradhikari/"
+    "dstnet-training-cache-checkpoints/"
+    "cache"
+)
+
+
+###############################################################################
+# Working Cache Locations
+###############################################################################
+
+#
+# New cache archive(s) are extracted here.
+#
+# This directory is writable.
+#
+###############################################################################
+
+NEW_CACHE_EXTRACT_ROOT = Path(
+    "/kaggle/working/new_cache_extracted"
+)
+
+
+###############################################################################
+# Writable Cache
+###############################################################################
+
+#
+# This is used for:
+#
+#     - extracted additional cache
+#     - any scenes that need to be generated during training
+#     - VERSION file
+#
+###############################################################################
+
+CACHE_ROOT = Path(
+    "/kaggle/working/cache"
+)
+
+VAL_CACHE_ROOT = Path(
+    "/kaggle/working/val_cache"
+)
+
+
+###############################################################################
 # Kaggle Working Directories
 ###############################################################################
 
-CHECKPOINT_ROOT = (
-    Path(
-        "/kaggle/working/checkpoints"
-    )
+CHECKPOINT_ROOT = Path(
+    "/kaggle/working/checkpoints"
 )
 
-LOG_ROOT = (
-    Path(
-        "/kaggle/working/logs"
-    )
+LOG_ROOT = Path(
+    "/kaggle/working/logs"
 )
 
-RESULTS_ROOT = (
-    Path(
-        "/kaggle/working/results"
-    )
-)
-
-CACHE_ROOT = (
-    Path(
-        "/kaggle/working/cache"
-    )
+RESULTS_ROOT = Path(
+    "/kaggle/working/results"
 )
 
 
 ###############################################################################
 # External Checkpoint Backup
-###############################################################################
-#
-# IMPORTANT:
-#
-# Replace this placeholder with a persistent mounted path later.
-#
-# For example, after you configure a persistent external mount:
-#
-#     EXTERNAL_CHECKPOINT_ROOT = Path(
-#         "/path/to/mounted/storage/DSTNet/checkpoints"
-#     )
-#
-# Keep EXTERNAL_CHECKPOINT_ENABLED=False until the path is valid.
-#
 ###############################################################################
 
 EXTERNAL_CHECKPOINT_ROOT = Path(
@@ -184,13 +253,6 @@ EXTERNAL_CHECKPOINT_ROOT = Path(
 )
 
 EXTERNAL_CHECKPOINT_ENABLED = False
-
-
-# The local checkpoint is written every epoch.
-#
-# An external copy is made every five completed epochs.
-#
-# Change this to 3 or 4 if desired.
 
 EXTERNAL_SAVE_EVERY = 5
 
@@ -215,6 +277,11 @@ RESULTS_ROOT.mkdir(
 )
 
 CACHE_ROOT.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+VAL_CACHE_ROOT.mkdir(
     parents=True,
     exist_ok=True,
 )
@@ -253,6 +320,7 @@ VALIDATE_EVERY = 5
 
 REFINEMENT_ENABLED = False
 
+
 ###############################################################################
 # Mixed Precision
 ###############################################################################
@@ -261,10 +329,8 @@ USE_AMP = False
 
 AMP_DTYPE = torch.float32
 
-
-# Printing every 10 batches is unnecessarily expensive
-# for ~100k batches per epoch.
 LOG_EVERY = 1000
+
 
 ###############################################################################
 # Early Stopping
@@ -325,6 +391,604 @@ def print_section(
 
 
 ###############################################################################
+# Cache Utilities
+###############################################################################
+
+
+def is_cache_file(
+    path: Path,
+) -> bool:
+
+    return (
+        path.is_file()
+        and path.suffix.lower() == ".pkl"
+    )
+
+
+def find_tar_archives(
+    root: Path,
+) -> list[Path]:
+    """
+    Find cache archives recursively.
+
+    Supported:
+
+        .tar
+        .tar.gz
+        .tgz
+        .tar.bz2
+        .tbz2
+        .tar.xz
+        .txz
+    """
+
+    if not root.exists():
+
+        return []
+
+    suffixes = (
+        ".tar",
+        ".tar.gz",
+        ".tgz",
+        ".tar.bz2",
+        ".tbz2",
+        ".tar.xz",
+        ".txz",
+    )
+
+    archives = []
+
+    for path in root.rglob("*"):
+
+        if not path.is_file():
+
+            continue
+
+        name = path.name.lower()
+
+        if name.endswith(suffixes):
+
+            archives.append(path)
+
+    return sorted(
+        archives
+    )
+
+
+def validate_archive_member(
+    member: tarfile.TarInfo,
+    destination: Path,
+) -> Path:
+    """
+    Prevent path traversal while extracting tar archives.
+    """
+
+    target = (
+        destination
+        / member.name
+    ).resolve()
+
+    destination_resolved = (
+        destination.resolve()
+    )
+
+    try:
+
+        target.relative_to(
+            destination_resolved
+        )
+
+    except ValueError:
+
+        raise RuntimeError(
+            "Unsafe tar archive member detected: "
+            f"{member.name}"
+        )
+
+    return target
+
+
+def extract_cache_archive(
+    archive: Path,
+    destination: Path,
+) -> None:
+    """
+    Extract one cache archive safely.
+    """
+
+    print()
+
+    print(
+        f"Extracting cache archive:"
+    )
+
+    print(
+        f"    {archive}"
+    )
+
+    destination.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with tarfile.open(
+        archive,
+        mode="r:*",
+    ) as tar:
+
+        members = tar.getmembers()
+
+        print(
+            f"Archive members : "
+            f"{len(members):,}"
+        )
+
+        for member in members:
+
+            validate_archive_member(
+                member,
+                destination,
+            )
+
+        tar.extractall(
+            destination,
+        )
+
+    print(
+        "Archive extraction complete."
+    )
+
+
+def find_cache_directories(
+    root: Path,
+) -> list[Path]:
+    """
+    Find directories containing CacheManager-style .pkl files.
+
+    A cache directory is expected to contain files such as:
+
+        123.pkl
+        456.pkl
+        789.pkl
+    """
+
+    if not root.exists():
+
+        return []
+
+    candidate_counts: dict[Path, int] = {}
+
+    for path in root.rglob("*.pkl"):
+
+        if not path.is_file():
+
+            continue
+
+        parent = path.parent
+
+        candidate_counts[parent] = (
+            candidate_counts.get(
+                parent,
+                0,
+            )
+            + 1
+        )
+
+    return [
+        directory
+        for directory, count
+        in sorted(
+            candidate_counts.items(),
+            key=lambda item: (
+                -item[1],
+                str(item[0]),
+            ),
+        )
+        if count > 0
+    ]
+
+
+def prepare_additional_cache() -> list[Path]:
+    """
+    Locate and extract additional cache archives.
+
+    Returns
+    -------
+    list[Path]
+        Directories containing extracted .pkl cache files.
+    """
+
+    print_section(
+        "Preparing Additional Cache"
+    )
+
+    if not PUBLISHED_CACHE_ROOT.exists():
+
+        raise FileNotFoundError(
+            "Published cache dataset does not exist:\n"
+            f"{PUBLISHED_CACHE_ROOT}"
+        )
+
+    print(
+        f"Published cache : "
+        f"{PUBLISHED_CACHE_ROOT}"
+    )
+
+    archives = find_tar_archives(
+        PUBLISHED_CACHE_ROOT
+    )
+
+    if not archives:
+
+        print(
+            "No cache archive found."
+        )
+
+        print(
+            "The published dataset will be used "
+            "as the cache source."
+        )
+
+        return []
+
+    print(
+        f"Cache archives found : "
+        f"{len(archives):,}"
+    )
+
+    NEW_CACHE_EXTRACT_ROOT.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    for archive in archives:
+
+        archive_marker = (
+            NEW_CACHE_EXTRACT_ROOT
+            / (
+                archive.name
+                + ".extracted"
+            )
+        )
+
+        if archive_marker.exists():
+
+            print()
+
+            print(
+                f"Already extracted : "
+                f"{archive.name}"
+            )
+
+            continue
+
+        extract_cache_archive(
+            archive,
+            NEW_CACHE_EXTRACT_ROOT,
+        )
+
+        archive_marker.write_text(
+            "extracted",
+            encoding="utf-8",
+        )
+
+    cache_directories = (
+        find_cache_directories(
+            NEW_CACHE_EXTRACT_ROOT
+        )
+    )
+
+    if not cache_directories:
+
+        raise RuntimeError(
+            "Cache archive(s) were found and extracted, "
+            "but no .pkl cache files could be located."
+        )
+
+    print()
+
+    print(
+        "Extracted cache directories:"
+    )
+
+    for directory in cache_directories:
+
+        count = len(
+            list(
+                directory.glob("*.pkl")
+            )
+        )
+
+        print(
+            f"    {directory} "
+            f"({count:,} files)"
+        )
+
+    return cache_directories
+
+
+###############################################################################
+# Combined Cache Manager
+###############################################################################
+
+
+class CombinedCacheManager:
+    """
+    Cache manager that combines multiple cache roots.
+
+    Search order
+    ------------
+    1. Writable primary cache roots
+    2. Additional extracted cache roots
+    3. Original read-only Kaggle cache
+
+    The first matching sequence ID is loaded.
+
+    New cache files are saved only into the first writable root.
+    """
+
+    def __init__(
+        self,
+        *,
+        writable_root: Path,
+        additional_roots: list[Path],
+        fallback_root: Path,
+    ) -> None:
+
+        self.writable_root = Path(
+            writable_root
+        )
+
+        self.additional_roots = [
+            Path(root)
+            for root in additional_roots
+        ]
+
+        self.fallback_root = Path(
+            fallback_root
+        )
+
+        self.writable_root.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self.version_file = (
+            self.writable_root
+            / "VERSION"
+        )
+
+        if not self.version_file.exists():
+
+            self.version_file.write_text(
+                "1.0",
+                encoding="utf-8",
+            )
+
+    ###########################################################################
+    # Cache path
+    ###########################################################################
+
+    def cache_path(
+        self,
+        sequence_id: str,
+    ) -> Path:
+
+        return (
+            self.writable_root
+            / f"{sequence_id}.pkl"
+        )
+
+    ###########################################################################
+    # Candidate paths
+    ###########################################################################
+
+    def candidate_paths(
+        self,
+        sequence_id: str,
+    ) -> list[Path]:
+
+        filename = (
+            f"{sequence_id}.pkl"
+        )
+
+        paths = [
+            self.writable_root
+            / filename
+        ]
+
+        paths.extend(
+            root / filename
+            for root
+            in self.additional_roots
+        )
+
+        paths.append(
+            self.fallback_root
+            / filename
+        )
+
+        return paths
+
+    ###########################################################################
+    # Exists
+    ###########################################################################
+
+    def exists(
+        self,
+        sequence_id: str,
+    ) -> bool:
+
+        for path in self.candidate_paths(
+            sequence_id
+        ):
+
+            if path.is_file():
+
+                return True
+
+        return False
+
+    ###########################################################################
+    # Load
+    ###########################################################################
+
+    def load(
+        self,
+        sequence_id: str,
+    ):
+        """
+        Load a cached SceneData object.
+
+        The search order is:
+
+            writable cache
+            additional extracted cache
+            original cache
+        """
+
+        candidate_paths = (
+            self.candidate_paths(
+                sequence_id
+            )
+        )
+
+        for path in candidate_paths:
+
+            if not path.is_file():
+
+                continue
+
+            try:
+
+                with open(
+                    path,
+                    "rb",
+                ) as file:
+
+                    scene = pickle.load(
+                        file
+                    )
+
+            except (
+                EOFError,
+                pickle.UnpicklingError,
+            ):
+
+                print()
+
+                print(
+                    f"[Cache] Corrupted cache detected: "
+                    f"{path}"
+                )
+
+                if path.parent == self.writable_root:
+
+                    path.unlink(
+                        missing_ok=True
+                    )
+
+                raise RuntimeError(
+                    "Corrupted cache detected for "
+                    f"{sequence_id}."
+                )
+
+            return scene
+
+        raise FileNotFoundError(
+            "Cached scene not found: "
+            f"{sequence_id}"
+        )
+
+    ###########################################################################
+    # Save
+    ###########################################################################
+
+    def save(
+        self,
+        scene,
+    ) -> None:
+
+        path = (
+            self.writable_root
+            / f"{scene.sequence_id}.pkl"
+        )
+
+        temp_path = (
+            self.writable_root
+            / f"{scene.sequence_id}.tmp"
+        )
+
+        with open(
+            temp_path,
+            "wb",
+        ) as file:
+
+            pickle.dump(
+                scene,
+                file,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+
+            file.flush()
+
+            os.fsync(
+                file.fileno()
+            )
+
+        temp_path.replace(
+            path
+        )
+
+    ###########################################################################
+    # Count
+    ###########################################################################
+
+    def num_cached(
+        self,
+    ) -> int:
+
+        sequence_ids = set()
+
+        for root in [
+            self.writable_root,
+            *self.additional_roots,
+            self.fallback_root,
+        ]:
+
+            if not root.exists():
+
+                continue
+
+            for path in root.glob(
+                "*.pkl"
+            ):
+
+                sequence_ids.add(
+                    path.stem
+                )
+
+        return len(
+            sequence_ids
+        )
+
+    ###########################################################################
+    # Representation
+    ###########################################################################
+
+    def __repr__(
+        self,
+    ) -> str:
+
+        return (
+            "CombinedCacheManager("
+            f"writable_root='{self.writable_root}', "
+            f"additional_roots={self.additional_roots}, "
+            f"fallback_root='{self.fallback_root}')"
+        )
+
+
+###############################################################################
 # Parameter Counter
 ###############################################################################
 
@@ -335,12 +999,14 @@ def count_parameters(
 
     total = sum(
         parameter.numel()
-        for parameter in model.parameters()
+        for parameter
+        in model.parameters()
     )
 
     trainable = sum(
         parameter.numel()
-        for parameter in model.parameters()
+        for parameter
+        in model.parameters()
         if parameter.requires_grad
     )
 
@@ -357,15 +1023,15 @@ def count_parameters(
 
 def build_preprocessor() -> ScenePreprocessor:
     """
-    Build the current ScenePreprocessor API.
+    Current ScenePreprocessor configuration.
 
-    Current parameters:
+    These values match the preprocessing used to generate the cache:
 
-        observation_steps
-        prediction_steps
-        map_sample_points
-        spatial_radius
-        map_radius
+        observation_steps = 20
+        prediction_steps = 30
+        map_sample_points = 20
+        spatial_radius = 30m
+        map_radius = 30m
     """
 
     return ScenePreprocessor(
@@ -391,9 +1057,12 @@ def build_dataset(
     root: Path,
     *,
     train: bool,
+    cache_manager,
 ) -> ArgoverseDataset:
     """
-    Build one Argoverse-1 split using the current dataset API.
+    Build one Argoverse-1 split.
+
+    Cached SceneData is loaded before raw parsing/preprocessing.
     """
 
     if not root.exists():
@@ -420,16 +1089,9 @@ def build_dataset(
 
     preprocessor = build_preprocessor()
 
-    cache = CacheManager(
-        CACHE_ROOT,
-    )
-
     transform = (
-
         build_train_transform()
-
         if train
-
         else build_eval_transform()
     )
 
@@ -443,7 +1105,7 @@ def build_dataset(
 
         transform=transform,
 
-        cache=cache,
+        cache=cache_manager,
     )
 
     return dataset
@@ -461,22 +1123,38 @@ def build_dataloader(
 ) -> DataLoader:
 
     kwargs = {
-        "dataset": dataset,
-        "batch_size": BATCH_SIZE,
-        "shuffle": train,
-        "num_workers": NUM_WORKERS,
-        "collate_fn": collate_fn,
-        "pin_memory": (
-            DEVICE.type == "cuda"
-        ),
-        "drop_last": False,
+
+        "dataset":
+            dataset,
+
+        "batch_size":
+            BATCH_SIZE,
+
+        "shuffle":
+            train,
+
+        "num_workers":
+            NUM_WORKERS,
+
+        "collate_fn":
+            collate_fn,
+
+        "pin_memory":
+            DEVICE.type == "cuda",
+
+        "drop_last":
+            False,
     }
 
     if NUM_WORKERS > 0:
 
-        kwargs["persistent_workers"] = True
+        kwargs[
+            "persistent_workers"
+        ] = True
 
-        kwargs["prefetch_factor"] = 2
+        kwargs[
+            "prefetch_factor"
+        ] = 2
 
     return DataLoader(
         **kwargs,
@@ -489,24 +1167,19 @@ def build_dataloader(
 
 
 def build_model() -> DSTNet:
-    """
-    Build the current DSTNet.
-
-    The model constructor defaults are used intentionally here so this
-    Kaggle-specific runner does not duplicate an older constructor
-    signature.
-    """
 
     model = DSTNet(
         refinement_enabled=REFINEMENT_ENABLED,
     )
 
     model.to(
-        DEVICE,
+        DEVICE
     )
 
-    total, trainable = count_parameters(
-        model,
+    total, trainable = (
+        count_parameters(
+            model
+        )
     )
 
     print_section(
@@ -564,9 +1237,16 @@ def build_training_components(
         ),
     )
 
-    criterion = TotalLoss(
-        refinement_enabled=REFINEMENT_ENABLED,
-    )
+    ###########################################################################
+    # IMPORTANT
+    #
+    # Current TotalLoss does NOT take refinement_enabled.
+    #
+    # Refinement is controlled by the DSTNet configuration.
+    #
+    ###########################################################################
+
+    criterion = TotalLoss()
 
     return (
         optimizer,
@@ -602,6 +1282,11 @@ def create_directories() -> None:
         exist_ok=True,
     )
 
+    VAL_CACHE_ROOT.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
 
 ###############################################################################
 # Checkpoint State
@@ -620,46 +1305,43 @@ def build_checkpoint_state(
 
     return {
 
-        "epoch": epoch,
+        "epoch":
+            epoch,
 
-        "train_loss": train_loss,
+        "train_loss":
+            train_loss,
 
-        "val_metrics": val_metrics,
+        "val_metrics":
+            val_metrics,
 
-        "best_metric": val_metrics.get(
-            "minADE",
-            float("inf"),
-        ),
+        "best_metric":
+            val_metrics.get(
+                "minADE",
+                float("inf"),
+            ),
 
-        "model_state_dict": (
-            model.state_dict()
-        ),
+        "model_state_dict":
+            model.state_dict(),
 
-        "optimizer_state_dict": (
-            optimizer.state_dict()
-        ),
+        "optimizer_state_dict":
+            optimizer.state_dict(),
 
-        "scheduler_state_dict": (
+        "scheduler_state_dict":
+            (
+                scheduler.state_dict()
+                if scheduler is not None
+                else None
+            ),
 
-            scheduler.state_dict()
+        "torch_rng_state":
+            torch.get_rng_state(),
 
-            if scheduler is not None
-
-            else None
-        ),
-
-        "torch_rng_state": (
-            torch.get_rng_state()
-        ),
-
-        "cuda_rng_state_all": (
-
-            torch.cuda.get_rng_state_all()
-
-            if torch.cuda.is_available()
-
-            else None
-        ),
+        "cuda_rng_state_all":
+            (
+                torch.cuda.get_rng_state_all()
+                if torch.cuda.is_available()
+                else None
+            ),
     }
 
 
@@ -678,12 +1360,6 @@ def save_checkpoint(
     val_metrics: dict[str, float],
     best: bool = False,
 ) -> Path:
-    """
-    Save the complete local checkpoint.
-
-    The checkpoint contains enough training state for model/optimizer/
-    scheduler restoration.
-    """
 
     checkpoint = build_checkpoint_state(
 
@@ -701,18 +1377,14 @@ def save_checkpoint(
     )
 
     torch.save(
-
         checkpoint,
-
         LATEST_CHECKPOINT,
     )
 
     if best:
 
         torch.save(
-
             checkpoint,
-
             BEST_CHECKPOINT,
         )
 
@@ -743,14 +1415,6 @@ def backup_checkpoint_externally(
     epoch: int,
     best: bool,
 ) -> None:
-    """
-    Copy the latest complete checkpoint to persistent external storage.
-
-    This is intentionally opt-in.
-
-    When enabled, an epoch-specific checkpoint and a rolling
-    ``latest_external.pth`` are written.
-    """
 
     if not EXTERNAL_CHECKPOINT_ENABLED:
 
@@ -814,8 +1478,7 @@ def backup_checkpoint_externally(
 
     if (
         best
-        and
-        BEST_CHECKPOINT.exists()
+        and BEST_CHECKPOINT.exists()
     ):
 
         external_best_path = (
@@ -850,9 +1513,6 @@ def load_checkpoint(
     optimizer,
     scheduler,
 ) -> tuple[int, float]:
-    """
-    Resume from the local latest checkpoint if one exists.
-    """
 
     if not LATEST_CHECKPOINT.exists():
 
@@ -881,50 +1541,42 @@ def load_checkpoint(
     )
 
     model.load_state_dict(
-
         checkpoint[
             "model_state_dict"
         ]
     )
 
     optimizer.load_state_dict(
-
         checkpoint[
             "optimizer_state_dict"
         ]
     )
 
     scheduler_state = checkpoint.get(
-
         "scheduler_state_dict",
-
         None,
     )
 
     if (
-
         scheduler is not None
-
         and scheduler_state is not None
     ):
 
         scheduler.load_state_dict(
-
             scheduler_state
         )
 
     ###########################################################################
-    # RNG State Restoration
-    #
-    # RNG restoration is optional. A malformed/legacy RNG state must NEVER
-    # prevent a valid model/optimizer/scheduler checkpoint from loading.
+    # CPU RNG
     ###########################################################################
 
     try:
 
         torch_rng_state = checkpoint.get(
             "torch_rng_state",
-            checkpoint.get("rng_state"),
+            checkpoint.get(
+                "rng_state"
+            ),
         )
 
         if isinstance(
@@ -932,7 +1584,10 @@ def load_checkpoint(
             torch.Tensor,
         ):
 
-            if torch_rng_state.dtype == torch.uint8:
+            if (
+                torch_rng_state.dtype
+                == torch.uint8
+            ):
 
                 torch.set_rng_state(
                     torch_rng_state.cpu()
@@ -955,7 +1610,9 @@ def load_checkpoint(
 
             cuda_rng_state = checkpoint.get(
                 "cuda_rng_state_all",
-                checkpoint.get("cuda_rng_states"),
+                checkpoint.get(
+                    "cuda_rng_states"
+                ),
             )
 
             if cuda_rng_state is not None:
@@ -971,7 +1628,10 @@ def load_checkpoint(
 
                         state = state.cpu()
 
-                        if state.dtype == torch.uint8:
+                        if (
+                            state.dtype
+                            == torch.uint8
+                        ):
 
                             valid_cuda_states.append(
                                 state
@@ -989,10 +1649,10 @@ def load_checkpoint(
                 else:
 
                     print(
-                        "Warning: CUDA RNG state in checkpoint "
-                        "is incompatible with the current CUDA "
-                        "device configuration. Skipping RNG "
-                        "restoration."
+                        "Warning: CUDA RNG state is "
+                        "incompatible with the current "
+                        "CUDA configuration. Skipping "
+                        "CUDA RNG restoration."
                     )
 
         except Exception as exc:
@@ -1003,7 +1663,6 @@ def load_checkpoint(
             )
 
     epoch = int(
-
         checkpoint.get(
             "epoch",
             0,
@@ -1011,22 +1670,15 @@ def load_checkpoint(
     )
 
     val_metrics = checkpoint.get(
-
         "val_metrics",
-
         {},
     )
 
     best_metric = float(
-
         checkpoint.get(
-
             "best_metric",
-
             val_metrics.get(
-
                 "minADE",
-
                 float("inf"),
             ),
         )
@@ -1165,45 +1817,40 @@ def train_one_epoch(
     criterion: TotalLoss,
     scaler: GradScaler,
 ) -> float:
-    """
-    Train DSTNet for one complete epoch.
-
-    Uses:
-      - optional CUDA AMP
-      - explicit finite-value checks
-      - gradient clipping
-      - safe handling of non-finite gradients
-      - reduced logging frequency
-
-    IMPORTANT:
-    When USE_AMP=False, training is performed entirely in FP32 and
-    GradScaler is bypassed.
-    """
 
     model.train()
 
     running_loss = 0.0
 
-    num_batches = len(dataloader)
+    num_batches = len(
+        dataloader
+    )
 
     if num_batches == 0:
+
         raise RuntimeError(
             "Training DataLoader contains zero batches."
         )
 
-    epoch_start = time.perf_counter()
+    epoch_start = (
+        time.perf_counter()
+    )
 
     skipped_batches = 0
 
     for batch_index, batch in enumerate(
+
         dataloader,
+
         start=1,
     ):
 
-        batch_start = time.perf_counter()
+        batch_start = (
+            time.perf_counter()
+        )
 
         #######################################################################
-        # Move batch to device
+        # Move batch
         #######################################################################
 
         batch = move_to_device(
@@ -1226,8 +1873,11 @@ def train_one_epoch(
         if USE_AMP:
 
             with autocast(
+
                 device_type=DEVICE.type,
+
                 dtype=AMP_DTYPE,
+
                 enabled=True,
             ):
 
@@ -1237,19 +1887,33 @@ def train_one_epoch(
                 ) = model(
 
                     agent_trajectories=(
-                        batch["agent_trajectories"]
+                        batch[
+                            "agent_trajectories"
+                        ]
                     ),
 
                     map_centerlines=(
-                        batch["map_centerlines"]
+                        batch[
+                            "map_centerlines"
+                        ]
                     ),
 
                     positions=(
-                        batch["positions"]
+                        batch[
+                            "positions"
+                        ]
+                    ),
+
+                    headings=(
+                        batch[
+                            "headings"
+                        ]
                     ),
 
                     graph=(
-                        batch["graph"]
+                        batch[
+                            "graph"
+                        ]
                     ),
 
                     agent_mask=batch.get(
@@ -1272,17 +1936,17 @@ def train_one_epoch(
                     ),
 
                     ground_truth=(
-                        batch["future_trajectories"]
+                        batch[
+                            "future_trajectories"
+                        ]
                     ),
                 )
 
-                loss = losses["loss"]
+                loss = losses[
+                    "loss"
+                ]
 
         else:
-
-            # ---------------------------------------------------------------
-            # Pure FP32 path
-            # ---------------------------------------------------------------
 
             (
                 coarse_prediction,
@@ -1290,19 +1954,33 @@ def train_one_epoch(
             ) = model(
 
                 agent_trajectories=(
-                    batch["agent_trajectories"]
+                    batch[
+                        "agent_trajectories"
+                    ]
                 ),
 
                 map_centerlines=(
-                    batch["map_centerlines"]
+                    batch[
+                        "map_centerlines"
+                    ]
                 ),
 
                 positions=(
-                    batch["positions"]
+                    batch[
+                        "positions"
+                    ]
+                ),
+
+                headings=(
+                    batch[
+                        "headings"
+                    ]
                 ),
 
                 graph=(
-                    batch["graph"]
+                    batch[
+                        "graph"
+                    ]
                 ),
 
                 agent_mask=batch.get(
@@ -1325,30 +2003,49 @@ def train_one_epoch(
                 ),
 
                 ground_truth=(
-                    batch["future_trajectories"]
+                    batch[
+                        "future_trajectories"
+                    ]
                 ),
             )
 
-            loss = losses["loss"]
+            loss = losses[
+                "loss"
+            ]
 
         #######################################################################
-        # Loss sanity check
+        # Loss sanity
         #######################################################################
 
-        if not torch.isfinite(loss).all():
+        if not torch.isfinite(
+            loss
+        ).all():
 
             print()
-            print("=" * 80)
-            print("NON-FINITE LOSS DETECTED")
-            print("=" * 80)
+
+            print(
+                "=" * 80
+            )
+
+            print(
+                "NON-FINITE LOSS DETECTED"
+            )
+
+            print(
+                "=" * 80
+            )
+
             print(
                 f"Epoch : {epoch}"
             )
+
             print(
                 f"Batch : {batch_index}"
             )
+
             print(
-                f"Loss  : {loss.detach().item()}"
+                f"Loss  : "
+                f"{loss.detach().item()}"
             )
 
             raise FloatingPointError(
@@ -1381,9 +2078,12 @@ def train_one_epoch(
 
         max_gradient_value = 0.0
 
-        for name, parameter in model.named_parameters():
+        for name, parameter in (
+            model.named_parameters()
+        ):
 
             if parameter.grad is None:
+
                 continue
 
             gradient = parameter.grad
@@ -1411,15 +2111,25 @@ def train_one_epoch(
             )
 
         #######################################################################
-        # Abort before optimizer update if gradients are invalid
+        # Invalid gradient handling
         #######################################################################
 
         if nonfinite_gradients:
 
             print()
-            print("=" * 80)
-            print("NON-FINITE GRADIENTS — SKIPPING BATCH")
-            print("=" * 80)
+
+            print(
+                "=" * 80
+            )
+
+            print(
+                "NON-FINITE GRADIENTS — "
+                "SKIPPING BATCH"
+            )
+
+            print(
+                "=" * 80
+            )
 
             print(
                 f"Epoch : {epoch}"
@@ -1439,23 +2149,23 @@ def train_one_epoch(
                 f"{len(nonfinite_gradients)}"
             )
 
-            for name in nonfinite_gradients[:10]:
+            for name in (
+                nonfinite_gradients[:10]
+            ):
 
                 print(
                     f"  {name}"
                 )
 
-            if len(nonfinite_gradients) > 10:
+            if (
+                len(nonfinite_gradients)
+                > 10
+            ):
 
                 print(
                     f"  ... and "
                     f"{len(nonfinite_gradients) - 10} more"
                 )
-
-            # ---------------------------------------------------------------
-            # IMPORTANT:
-            # Do not perform optimizer.step() on this batch.
-            # ---------------------------------------------------------------
 
             if USE_AMP:
 
@@ -1513,7 +2223,9 @@ def train_one_epoch(
             loss.detach().item()
         )
 
-        running_loss += loss_value
+        running_loss += (
+            loss_value
+        )
 
         batch_time = (
             time.perf_counter()
@@ -1525,8 +2237,11 @@ def train_one_epoch(
         #######################################################################
 
         if (
+
             batch_index == 1
+
             or batch_index % LOG_EVERY == 0
+
             or batch_index == num_batches
         ):
 
@@ -1598,9 +2313,6 @@ def validate_one_epoch(
     model: DSTNet,
     dataloader: DataLoader,
 ) -> dict[str, float]:
-    """
-    Evaluate using the current Evaluator.
-    """
 
     print()
 
@@ -1628,21 +2340,23 @@ def validate_one_epoch(
     metrics = evaluator.evaluate()
 
     validation_time = (
-
         time.perf_counter()
-
         - start_time
     )
 
     print()
 
-    print("-" * 80)
+    print(
+        "-" * 80
+    )
 
     print(
         "Validation Metrics"
     )
 
-    print("-" * 80)
+    print(
+        "-" * 80
+    )
 
     for key in sorted(
         metrics.keys()
@@ -1658,7 +2372,6 @@ def validate_one_epoch(
     print()
 
     print(
-
         f"Validation Time : "
         f"{validation_time:.2f} s"
     )
@@ -1732,39 +2445,122 @@ def print_epoch_summary(
     print("=" * 80)
 
     print(
-
         f"Train Loss : "
         f"{train_loss:.6f}"
     )
 
     print(
-
         f"minADE     : "
         f"{metrics.get('minADE', float('nan')):.6f}"
     )
 
     print(
-
         f"minFDE     : "
         f"{metrics.get('minFDE', float('nan')):.6f}"
     )
 
     print(
-
         f"MissRate   : "
         f"{metrics.get('MissRate', float('nan')):.6f}"
     )
 
     print(
-
         f"Learning Rate : "
         f"{learning_rate:.8e}"
     )
 
     print(
-
         f"Epoch Time   : "
         f"{epoch_time:.2f} s"
+    )
+
+
+###############################################################################
+# Cache Diagnostics
+###############################################################################
+
+
+def print_cache_summary(
+    cache_manager: CombinedCacheManager,
+    additional_roots: list[Path],
+) -> None:
+
+    print_section(
+        "Cache Summary"
+    )
+
+    original_count = 0
+
+    if PUBLISHED_CACHE_ROOT.exists():
+
+        original_count = len(
+            list(
+                PUBLISHED_CACHE_ROOT.glob(
+                    "*.pkl"
+                )
+            )
+        )
+
+    additional_count = 0
+
+    for root in additional_roots:
+
+        additional_count += len(
+            list(
+                root.glob("*.pkl")
+            )
+        )
+
+    working_count = len(
+        list(
+            CACHE_ROOT.glob("*.pkl")
+        )
+    )
+
+    combined_count = (
+        cache_manager.num_cached()
+    )
+
+    print(
+        f"Original cache files : "
+        f"{original_count:,}"
+    )
+
+    print(
+        f"Additional cache files : "
+        f"{additional_count:,}"
+    )
+
+    print(
+        f"Working cache files : "
+        f"{working_count:,}"
+    )
+
+    print(
+        f"Unique combined scenes : "
+        f"{combined_count:,}"
+    )
+
+    print()
+
+    print(
+        f"Original cache root : "
+        f"{PUBLISHED_CACHE_ROOT}"
+    )
+
+    for index, root in enumerate(
+        additional_roots,
+        start=1,
+    ):
+
+        print(
+            f"Additional cache {index} : "
+            f"{root}"
+        )
+
+    print(
+        f"Writable cache root : "
+        f"{CACHE_ROOT}"
     )
 
 
@@ -1780,6 +2576,30 @@ def run_training() -> None:
     initialize_csv()
 
     ###########################################################################
+    # Prepare cache
+    ###########################################################################
+
+    additional_cache_roots = (
+        prepare_additional_cache()
+    )
+
+    train_cache = CombinedCacheManager(
+
+        writable_root=CACHE_ROOT,
+
+        additional_roots=additional_cache_roots,
+
+        fallback_root=PUBLISHED_CACHE_ROOT,
+    )
+
+    print_cache_summary(
+
+        train_cache,
+
+        additional_cache_roots,
+    )
+
+    ###########################################################################
     # Datasets
     ###########################################################################
 
@@ -1787,11 +2607,30 @@ def run_training() -> None:
         "Building Datasets"
     )
 
+    print(
+        "IMPORTANT:"
+    )
+
+    print(
+        "Training scenes are loaded from the "
+        "preprocessed cache whenever available."
+    )
+
     train_dataset = build_dataset(
 
         TRAIN_ROOT,
 
         train=True,
+
+        cache_manager=train_cache,
+    )
+
+    ###########################################################################
+    # Validation gets its own writable cache.
+    ###########################################################################
+
+    val_cache = CacheManager(
+        VAL_CACHE_ROOT
     )
 
     val_dataset = build_dataset(
@@ -1799,18 +2638,48 @@ def run_training() -> None:
         VAL_ROOT,
 
         train=False,
+
+        cache_manager=val_cache,
     )
 
-    print(
+    print()
 
+    print(
         f"Training Scenes   : "
         f"{len(train_dataset):,}"
     )
 
     print(
-
         f"Validation Scenes : "
         f"{len(val_dataset):,}"
+    )
+
+    ###########################################################################
+    # Cache coverage
+    ###########################################################################
+
+    cached_training_scenes = 0
+
+    for sequence_id in (
+        train_dataset.sequence_ids
+    ):
+
+        if train_cache.exists(
+            sequence_id
+        ):
+
+            cached_training_scenes += 1
+
+    print()
+
+    print(
+        f"Training scenes already cached : "
+        f"{cached_training_scenes:,}"
+    )
+
+    print(
+        f"Training scenes requiring preprocessing : "
+        f"{len(train_dataset) - cached_training_scenes:,}"
     )
 
     ###########################################################################
@@ -1836,13 +2705,11 @@ def run_training() -> None:
     )
 
     print(
-
         f"Training Batches   : "
         f"{len(train_loader):,}"
     )
 
     print(
-
         f"Validation Batches : "
         f"{len(val_loader):,}"
     )
@@ -1854,7 +2721,9 @@ def run_training() -> None:
     model = build_model()
 
     scaler = GradScaler(
+
         device="cuda",
+
         enabled=USE_AMP,
     )
 
@@ -1937,8 +2806,14 @@ def run_training() -> None:
                 scaler=scaler,
             )
 
+            ###################################################################
+            # Validation
+            ###################################################################
+
             if (
+
                 epoch % VALIDATE_EVERY == 0
+
                 or epoch == EPOCHS
             ):
 
@@ -1954,10 +2829,20 @@ def run_training() -> None:
             else:
 
                 val_metrics = {
-                    "minADE": best_metric,
-                    "minFDE": float("nan"),
-                    "MissRate": float("nan"),
+
+                    "minADE":
+                        best_metric,
+
+                    "minFDE":
+                        float("nan"),
+
+                    "MissRate":
+                        float("nan"),
                 }
+
+            ###################################################################
+            # Epoch timing
+            ###################################################################
 
             epoch_time = (
 
@@ -1987,7 +2872,7 @@ def run_training() -> None:
             )
 
             ###################################################################
-            # Best Model
+            # Best model
             ###################################################################
 
             current_metric = (
@@ -2037,7 +2922,7 @@ def run_training() -> None:
                 )
 
             ###################################################################
-            # Local Checkpoint
+            # Checkpoint
             ###################################################################
 
             if (
@@ -2064,10 +2949,6 @@ def run_training() -> None:
                     best=is_best,
                 )
 
-                ################################################################
-                # Optional external backup
-                ################################################################
-
                 backup_checkpoint_externally(
 
                     epoch=epoch,
@@ -2076,7 +2957,7 @@ def run_training() -> None:
                 )
 
             ###################################################################
-            # Epoch Summary
+            # Summary
             ###################################################################
 
             print_epoch_summary(
@@ -2093,7 +2974,7 @@ def run_training() -> None:
             )
 
             ###################################################################
-            # Early Stopping
+            # Early stopping
             ###################################################################
 
             if (
@@ -2178,6 +3059,10 @@ def run_training() -> None:
 
         raise
 
+    ###########################################################################
+    # Complete
+    ###########################################################################
+
     total_training_time = (
 
         time.perf_counter()
@@ -2190,39 +3075,38 @@ def run_training() -> None:
     )
 
     print(
-
         f"Best minADE : "
         f"{best_metric:.6f}"
     )
 
     print(
-
         f"Total Time  : "
         f"{total_training_time / 3600:.2f} hours"
     )
 
     print(
-
         f"Checkpoints : "
         f"{CHECKPOINT_ROOT}"
     )
 
     print(
-
         f"Logs        : "
         f"{CSV_LOG}"
     )
 
     print(
+        f"Original Cache : "
+        f"{PUBLISHED_CACHE_ROOT}"
+    )
 
-        f"Cache       : "
-        f"{CACHE_ROOT}"
+    print(
+        f"Additional Cache : "
+        f"{NEW_CACHE_EXTRACT_ROOT}"
     )
 
     if EXTERNAL_CHECKPOINT_ENABLED:
 
         print(
-
             f"External backups : "
             f"{EXTERNAL_CHECKPOINT_ROOT}"
         )
@@ -2255,42 +3139,51 @@ def main() -> None:
     )
 
     print(
-        f"Train root  : "
+        f"Train root       : "
         f"{TRAIN_ROOT}"
     )
 
     print(
-        f"Val root    : "
+        f"Val root         : "
         f"{VAL_ROOT}"
     )
 
     print(
-        f"Map root    : "
+        f"Map root         : "
         f"{MAP_ROOT}"
     )
 
     print(
-        f"Cache root  : "
+        f"Published cache  : "
+        f"{PUBLISHED_CACHE_ROOT}"
+    )
+
+    print(
+        f"Additional cache : "
+        f"{NEW_CACHE_EXTRACT_ROOT}"
+    )
+
+    print(
+        f"Working cache    : "
         f"{CACHE_ROOT}"
     )
 
     print(
-        f"Device      : "
+        f"Device           : "
         f"{DEVICE}"
     )
 
     print(
-        f"Batch size  : "
+        f"Batch size       : "
         f"{BATCH_SIZE}"
     )
 
     print(
-        f"Epochs      : "
+        f"Epochs           : "
         f"{EPOCHS}"
     )
 
     print(
-
         f"External checkpointing : "
         f"{EXTERNAL_CHECKPOINT_ENABLED}"
     )
