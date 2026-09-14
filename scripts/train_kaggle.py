@@ -67,6 +67,8 @@ import time
 from pathlib import Path
 import pickle
 
+import warnings
+
 os.environ.setdefault(
     "PYTORCH_ALLOC_CONF",
     "expandable_segments:True",
@@ -539,9 +541,13 @@ class MultiCacheManager:
                     "rb",
                 ) as file:
 
-                    scene = pickle.load(
-                        file
-                    )
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message=r"numpy\.core\.numeric is deprecated.*",
+                            category=DeprecationWarning,
+                        )
+                        scene = pickle.load(file)
 
             except (
                 EOFError,
