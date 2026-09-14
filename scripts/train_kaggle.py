@@ -294,7 +294,7 @@ GRADIENT_CLIP = 0.5
 
 VALIDATE_EVERY = 5
 
-REFINEMENT_ENABLED = True
+REFINEMENT_ENABLED = False
 
 
 ###############################################################################
