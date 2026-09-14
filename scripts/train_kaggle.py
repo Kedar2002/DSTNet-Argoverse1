@@ -292,7 +292,7 @@ GRADIENT_CLIP = 0.5
 
 VALIDATE_EVERY = 5
 
-REFINEMENT_ENABLED = False
+REFINEMENT_ENABLED = True
 
 
 ###############################################################################
@@ -905,7 +905,9 @@ def build_training_components(
         ),
     )
 
-    criterion = TotalLoss()
+    criterion = TotalLoss(
+        refinement_enabled=REFINEMENT_ENABLED,
+    )
 
     return (
         optimizer,
