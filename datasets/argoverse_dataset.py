@@ -10,7 +10,9 @@ from pathlib import Path
 
 from torch.utils.data import Dataset
 
-from datasets.cache_manager import CacheManager
+from typing import Protocol
+
+from datasets.scene_data import SceneData
 from datasets.preprocess import ScenePreprocessor
 from datasets.scene_data import SceneData
 from datasets.scene_parser import SceneParser
@@ -19,7 +21,31 @@ from datasets.transforms import (
     Transform,
 )
 
+class CacheInterface(Protocol):
+    """
+    Read/write cache interface required by ArgoverseDataset.
 
+    Any cache implementation used by the dataset must provide these
+    operations.
+    """
+
+    def exists(
+        self,
+        sequence_id: str,
+    ) -> bool:
+        ...
+
+    def load(
+        self,
+        sequence_id: str,
+    ) -> SceneData:
+        ...
+
+    def save(
+        self,
+        scene: SceneData,
+    ) -> None:
+        ...
 class ArgoverseDataset(Dataset):
     """
     PyTorch Dataset for Argoverse 1.
@@ -31,7 +57,8 @@ class ArgoverseDataset(Dataset):
         parser: SceneParser,
         preprocessor: ScenePreprocessor,
         transform: Transform | None = None,
-        cache: CacheManager | None = None,
+        cache: CacheInterface | None = None,
+        cache_only: bool = False,
     ) -> None:
 
         self.root = Path(root)
@@ -47,6 +74,8 @@ class ArgoverseDataset(Dataset):
         )
 
         self.cache = cache
+
+        self.cache_only = cache_only
 
         self.files = sorted(
             self.root.glob("*.csv")
@@ -77,48 +106,68 @@ class ArgoverseDataset(Dataset):
 
         sequence_id = csv_path.stem
 
-        #######################################################################
+        ########################################################################
         # Cache
-        #######################################################################
+        ########################################################################
 
-        if (
-            self.cache is not None
-            and self.cache.exists(sequence_id)
-        ):
+        if self.cache is not None:
 
-            return self.cache.load(
-                sequence_id
-            )
+            if self.cache.exists(sequence_id):
 
-        #######################################################################
+                return self.cache.load(
+                    sequence_id
+                )
+
+            #######################################################################
+            # Strict cache-only mode
+            #######################################################################
+
+            if self.cache_only:
+
+                raise FileNotFoundError(
+                    "Required preprocessed cache is missing "
+                    f"for sequence '{sequence_id}'. "
+                    "Cache-only mode is enabled, so "
+                    "CSV parsing and preprocessing are disabled."
+                )
+
+        ########################################################################
         # Parse
-        #######################################################################
+        ########################################################################
 
         scene = self.parser.parse(
             csv_path,
         )
 
-        #######################################################################
+        ########################################################################
         # Transform
-        #######################################################################
+        ########################################################################
 
         scene = self.transform(
             scene,
         )
 
-        #######################################################################
+        ########################################################################
         # Preprocess
-        #######################################################################
+        ########################################################################
 
         processed = self.preprocessor.preprocess(
             scene,
         )
 
-        #######################################################################
+        ########################################################################
         # Cache
-        #######################################################################
+        ########################################################################
 
         if self.cache is not None:
+
+            if self.cache_only:
+
+                raise RuntimeError(
+                    "Cache-only mode reached the cache save path "
+                    f"for sequence '{sequence_id}'. "
+                    "This indicates an unexpected dataset/cache state."
+                )
 
             self.cache.save(
                 processed,
@@ -126,7 +175,7 @@ class ArgoverseDataset(Dataset):
 
         return processed
 
-        ###########################################################################
+    ###########################################################################
     # Utilities
     ###########################################################################
 

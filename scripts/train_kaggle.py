@@ -65,7 +65,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import cast
+import pickle
 
 os.environ.setdefault(
     "PYTORCH_ALLOC_CONF",
@@ -216,11 +216,11 @@ RESULTS_ROOT = (
 # ArgoverseDataset pipeline will preprocess it and write it here.
 # ---------------------------------------------------------------------------
 
-CACHE_ROOT = (
-    Path(
-        "/kaggle/working/cache"
-    )
-)
+# CACHE_ROOT = (
+#     Path(
+#         "/kaggle/working/cache"
+#     )
+# )
 
 
 ###############################################################################
@@ -255,10 +255,10 @@ RESULTS_ROOT.mkdir(
     exist_ok=True,
 )
 
-CACHE_ROOT.mkdir(
-    parents=True,
-    exist_ok=True,
-)
+# CACHE_ROOT.mkdir(
+#     parents=True,
+#     exist_ok=True,
+# )
 
 
 ###############################################################################
@@ -426,11 +426,13 @@ def build_preprocessor() -> ScenePreprocessor:
 
 class MultiCacheManager:
     """
-    Read-through cache manager for multiple cache directories.
+    Read-only cache manager for multiple persistent Kaggle cache datasets.
 
     The caches are searched in the order supplied to the constructor.
 
-    For example:
+    Example
+    -------
+    Training:
 
         MultiCacheManager(
             [
@@ -439,35 +441,49 @@ class MultiCacheManager:
             ]
         )
 
-    means:
+    Search order:
 
-        1. Search the original training cache.
-        2. If not found, search the additional training cache.
+        1. Original training cache
+        2. Additional training cache
 
-    ``save()`` always writes to the local fallback cache.
+    Validation:
 
-    This class intentionally exposes the small interface required by
-    ArgoverseDataset:
+        MultiCacheManager(
+            [
+                VAL_CACHE_ROOT,
+            ]
+        )
 
-        exists(sequence_id)
-        load(sequence_id)
-        save(scene)
+    This manager is intentionally READ-ONLY.
+
+    It never:
+        - creates directories
+        - creates VERSION files
+        - writes .tmp files
+        - writes .pkl files
+        - falls back to /kaggle/working
     """
 
     def __init__(
         self,
         cache_roots: list[Path],
-        fallback_root: Path,
     ) -> None:
+
+        if not cache_roots:
+
+            raise ValueError(
+                "MultiCacheManager requires at least "
+                "one cache root."
+            )
 
         self.cache_roots = [
             Path(root)
             for root in cache_roots
         ]
 
-        self.fallback_cache = CacheManager(
-            fallback_root,
-        )
+    ###########################################################################
+    # Exists
+    ###########################################################################
 
     def exists(
         self,
@@ -476,21 +492,34 @@ class MultiCacheManager:
 
         for root in self.cache_roots:
 
-            if (
+            path = (
                 root
                 / f"{sequence_id}.pkl"
-            ).exists():
+            )
+
+            if path.is_file():
 
                 return True
 
-        return self.fallback_cache.exists(
-            sequence_id
-        )
+        return False
+
+    ###########################################################################
+    # Load
+    ###########################################################################
 
     def load(
         self,
         sequence_id: str,
     ):
+        """
+        Load a cached SceneData object.
+
+        The cache is searched in the configured order.
+
+        No CacheManager instance is created here because CacheManager's
+        constructor is writable and would attempt to create/update files
+        inside the read-only Kaggle input dataset.
+        """
 
         for root in self.cache_roots:
 
@@ -499,25 +528,69 @@ class MultiCacheManager:
                 / f"{sequence_id}.pkl"
             )
 
-            if path.exists():
+            if not path.is_file():
 
-                return CacheManager(
-                    root
-                ).load(
-                    sequence_id
+                continue
+
+            try:
+
+                with open(
+                    path,
+                    "rb",
+                ) as file:
+
+                    scene = pickle.load(
+                        file
+                    )
+
+            except (
+                EOFError,
+                pickle.UnpicklingError,
+            ) as exc:
+
+                raise RuntimeError(
+                    "Corrupted persistent cache detected: "
+                    f"{path}"
+                ) from exc
+
+            ###################################################################
+            # Validate cached object
+            ###################################################################
+
+            from datasets.scene_data import SceneData
+
+            if not isinstance(
+                scene,
+                SceneData,
+            ):
+
+                raise TypeError(
+                    "Invalid cached object in "
+                    f"{path}. Expected SceneData, "
+                    f"got {type(scene).__name__}."
                 )
 
-        return self.fallback_cache.load(
-            sequence_id
+            return scene
+
+        raise FileNotFoundError(
+            "Cached scene was not found in any "
+            f"persistent cache for sequence '{sequence_id}'. "
+            f"Searched: {self.cache_roots}"
         )
+
+    ###########################################################################
+    # Save
+    ###########################################################################
 
     def save(
         self,
         scene,
     ) -> None:
 
-        self.fallback_cache.save(
-            scene
+        raise RuntimeError(
+            "MultiCacheManager is read-only. "
+            "Training/validation must not create or modify "
+            "persistent cache files."
         )
 
 
@@ -530,8 +603,13 @@ def validate_cache_roots() -> None:
     """
     Verify the persistent cache directories before training begins.
 
-    The original CSV datasets are still required because they are the
-    fallback source for any scene absent from the persistent caches.
+    The original CSV directories remain configured so that the dataset
+    can obtain the sequence IDs and establish dataset length.
+
+    They are NOT used for parsing or preprocessing in cache-only mode.
+
+    Every scene required for training and validation must exist in the
+    persistent cache datasets.
     """
 
     print_section(
@@ -599,7 +677,7 @@ def build_dataset(
     train: bool,
 ) -> ArgoverseDataset:
     """
-    Build one Argoverse-1 split.
+    Build one Argoverse-1 split using persistent preprocessed caches.
 
     Training
     --------
@@ -614,8 +692,10 @@ def build_dataset(
 
         VAL_CACHE_ROOT
 
-    The original CSV root remains available as a fallback if a scene is
-    missing from its persistent cache.
+    The dataset operates in strict cache-only mode.
+
+    The CSV root is retained for dataset indexing and sequence IDs, but
+    missing cached scenes are NOT parsed or preprocessed.
     """
 
     if not root.exists():
@@ -670,7 +750,6 @@ def build_dataset(
 
         cache_roots=persistent_cache_roots,
 
-        fallback_root=CACHE_ROOT,
     )
 
     ###########################################################################
@@ -700,10 +779,9 @@ def build_dataset(
 
         transform=transform,
 
-        cache=cast(
-            CacheManager,
-            cache,
-        ),
+        cache=cache,
+
+        cache_only=True,
     )
 
     return dataset
@@ -827,9 +905,7 @@ def build_training_components(
         ),
     )
 
-    criterion = TotalLoss(
-        refinement_enabled=REFINEMENT_ENABLED,
-    )
+    criterion = TotalLoss()
 
     return (
         optimizer,
@@ -860,10 +936,10 @@ def create_directories() -> None:
         exist_ok=True,
     )
 
-    CACHE_ROOT.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    # CACHE_ROOT.mkdir(
+    #     parents=True,
+    #     exist_ok=True,
+    # )
 
 
 ###############################################################################
@@ -2410,10 +2486,10 @@ def run_training() -> None:
         f"{CSV_LOG}"
     )
 
-    print(
-        f"Local fallback cache : "
-        f"{CACHE_ROOT}"
-    )
+    # print(
+    #     f"Local fallback cache : "
+    #     f"{CACHE_ROOT}"
+    # )
 
     print()
     print(
@@ -2499,10 +2575,10 @@ def main() -> None:
         f"{VAL_CACHE_ROOT}"
     )
 
-    print(
-        f"Fallback cache         : "
-        f"{CACHE_ROOT}"
-    )
+    # print(
+    #     f"Fallback cache         : "
+    #     f"{CACHE_ROOT}"
+    # )
 
     print(
         f"Device                 : "
