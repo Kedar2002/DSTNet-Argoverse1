@@ -301,7 +301,7 @@ REFINEMENT_ENABLED = False
 # Mixed Precision
 ###############################################################################
 
-USE_AMP = False
+USE_AMP = True
 
 AMP_DTYPE = torch.float32
 
