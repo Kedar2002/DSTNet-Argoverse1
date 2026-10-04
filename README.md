@@ -340,6 +340,8 @@ shards. It requires a CUDA GPU by default; `DSTNET_ALLOW_CPU=1` is available
 for local debugging. Set `DSTNET_VALIDATE_FINITE=1` for detailed per-layer
 numerical checks. The trainer always checks each loss and each validation
 metric for finite values, and it reports repeated skipped FP16 updates.
+It uses scaled FP16 on T4-class GPUs and native BF16 only on compatible
+hardware. The default learning rate is `2e-5` for a more conservative start.
 
 Useful run-time overrides include `DSTNET_BATCH_SIZE`, `DSTNET_NUM_WORKERS`,
 `DSTNET_EPOCHS`, `DSTNET_LEARNING_RATE`, `DSTNET_VALIDATE_EVERY`, and

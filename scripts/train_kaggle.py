@@ -374,7 +374,7 @@ NUM_WORKERS = int(
 
 EPOCHS = int(os.environ.get("DSTNET_EPOCHS", "30"))
 
-LEARNING_RATE = float(os.environ.get("DSTNET_LEARNING_RATE", "1e-4"))
+LEARNING_RATE = float(os.environ.get("DSTNET_LEARNING_RATE", "2e-5"))
 
 WEIGHT_DECAY = float(os.environ.get("DSTNET_WEIGHT_DECAY", "1e-4"))
 
@@ -401,13 +401,16 @@ INIT_CHECKPOINT = os.environ.get("DSTNET_INIT_CHECKPOINT", "").strip()
 
 USE_AMP = True
 
+NATIVE_BF16_SUPPORTED = (
+    DEVICE.type == "cuda"
+    and hasattr(torch.cuda, "is_bf16_supported")
+    and torch.cuda.get_device_capability(DEVICE)[0] >= 8
+    and torch.cuda.is_bf16_supported()
+)
+
 AMP_DTYPE = (
     torch.bfloat16
-    if (
-        torch.cuda.is_available()
-        and hasattr(torch.cuda, "is_bf16_supported")
-        and torch.cuda.is_bf16_supported()
-    )
+    if NATIVE_BF16_SUPPORTED
     else torch.float16
 )
 
@@ -1824,6 +1827,8 @@ def train_one_epoch(
     successful_updates = 0
     skipped_amp_updates = 0
     consecutive_skipped_amp_updates = 0
+    skipped_nonfinite_gradient_updates = 0
+    consecutive_nonfinite_gradient_updates = 0
     max_consecutive_amp_skips = max(
         1,
         int(os.environ.get("DSTNET_MAX_CONSECUTIVE_AMP_SKIPS", "25")),
@@ -2025,7 +2030,7 @@ def train_one_epoch(
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 max_norm=GRADIENT_CLIP,
-                error_if_nonfinite=not SCALER_ENABLED,
+                error_if_nonfinite=False,
             )
         )
 
@@ -2033,7 +2038,28 @@ def train_one_epoch(
         # Optimizer update
         #######################################################################
 
-        if SCALER_ENABLED:
+        did_update = bool(torch.isfinite(gradient_norm).item())
+
+        if not did_update:
+            # A non-finite global norm can arise before individual gradients
+            # become non-finite. Never pass such a batch to AdamW. If AMP is
+            # scaled, update the scaler so it can reduce its scale after an
+            # overflow recorded by unscale_().
+            optimizer.zero_grad(set_to_none=True)
+            if SCALER_ENABLED:
+                scaler.update()
+            skipped_nonfinite_gradient_updates += 1
+            consecutive_nonfinite_gradient_updates += 1
+            if consecutive_nonfinite_gradient_updates >= max_consecutive_amp_skips:
+                raise FloatingPointError(
+                    "Gradient clipping found a non-finite total norm for "
+                    f"{consecutive_nonfinite_gradient_updates} consecutive "
+                    "batches. The optimizer was not updated for those batches. "
+                    "Lower DSTNET_LEARNING_RATE or DSTNET_BATCH_SIZE, then "
+                    "resume from the latest completed-epoch checkpoint."
+                )
+
+        elif SCALER_ENABLED:
 
             previous_scale = scaler.get_scale()
 
@@ -2048,6 +2074,7 @@ def train_one_epoch(
             if did_update:
                 successful_updates += 1
                 consecutive_skipped_amp_updates = 0
+                consecutive_nonfinite_gradient_updates = 0
             else:
                 skipped_amp_updates += 1
                 consecutive_skipped_amp_updates += 1
@@ -2063,14 +2090,13 @@ def train_one_epoch(
 
             optimizer.step()
             successful_updates += 1
+            consecutive_nonfinite_gradient_updates = 0
 
         #######################################################################
         # Scheduler
         #######################################################################
 
-        if scheduler is not None and (
-            not SCALER_ENABLED or did_update
-        ):
+        if scheduler is not None and did_update:
 
             scheduler.step()
 
@@ -2154,6 +2180,13 @@ def train_one_epoch(
     if skipped_amp_updates:
         print(
             f"AMP updates skipped : {skipped_amp_updates:,}",
+            flush=True,
+        )
+
+    if skipped_nonfinite_gradient_updates:
+        print(
+            "Non-finite gradient batches skipped : "
+            f"{skipped_nonfinite_gradient_updates:,}",
             flush=True,
         )
 
@@ -2902,6 +2935,16 @@ def main() -> None:
     print(
         f"Mixed precision        : "
         f"{AMP_ENABLED} ({AMP_DTYPE})"
+    )
+
+    print(
+        f"Native BF16 supported  : "
+        f"{NATIVE_BF16_SUPPORTED}"
+    )
+
+    print(
+        f"FP16 gradient scaler   : "
+        f"{SCALER_ENABLED}"
     )
 
     print(
