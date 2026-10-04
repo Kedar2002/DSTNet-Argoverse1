@@ -12,15 +12,15 @@ Training cache sources
 ----------------------
 Training scenes are loaded from two persistent Kaggle datasets:
 
-    1. dstnet-training-cache-part-1
-    2. dstnet-training-cache-part-2
+    1. av1-train-p1-cache
+    2. av1-train-p2-cache
 
 The first cache is checked first. If a sequence is not present there,
 the additional training cache is checked.
 
 Validation scenes are loaded from:
 
-    dstnet-validation-cache
+    av1-val-cache
 
 All required scene IDs are checked against the mounted cache shards before
 training begins. Cache generation is handled by
@@ -64,6 +64,7 @@ import random
 import shutil
 import sys
 import time
+from dataclasses import fields, replace
 from pathlib import Path
 import pickle
 from contextlib import nullcontext
@@ -102,6 +103,25 @@ if str(PROJECT_ROOT) not in sys.path:
         str(PROJECT_ROOT),
     )
 
+# Kaggle commonly has Hugging Face's package named ``datasets`` installed.
+# A notebook may have imported it before this script runs, in which case
+# Python would otherwise resolve it instead of this repository's package.
+_loaded_datasets = sys.modules.get("datasets")
+if _loaded_datasets is not None:
+    _loaded_datasets_path = getattr(_loaded_datasets, "__file__", None)
+    _is_project_datasets = False
+    if _loaded_datasets_path is not None:
+        try:
+            Path(_loaded_datasets_path).resolve().relative_to(PROJECT_ROOT)
+            _is_project_datasets = True
+        except ValueError:
+            pass
+
+    if not _is_project_datasets:
+        for _module_name in tuple(sys.modules):
+            if _module_name == "datasets" or _module_name.startswith("datasets."):
+                del sys.modules[_module_name]
+
 
 ###############################################################################
 # Current Repository Imports
@@ -136,19 +156,51 @@ from models.dstnet import DSTNet
 # Kaggle Dataset Paths
 ###############################################################################
 
-TRAIN_ROOT = Path(os.environ.get(
-    "DSTNET_TRAIN_ROOT",
-    "/kaggle/input/datasets/narendarmallireddy/"
-    "argoverse1-motion-dataset/"
-    "forecasting_train_v1.1/train/data",
-))
+def _resolve_kaggle_input(
+    environment_name: str,
+    candidates: tuple[Path, ...],
+) -> Path:
+    """Use an explicit path override, or the first mounted Kaggle path."""
 
-VAL_ROOT = Path(os.environ.get(
+    override = os.environ.get(environment_name, "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    return next(
+        (candidate for candidate in candidates if candidate.is_dir()),
+        candidates[0],
+    )
+
+
+_ARGOVERSE_SLUG = "argoverse1-motion-dataset"
+_ARGOVERSE_OWNER = os.environ.get(
+    "DSTNET_ARGOVERSE_OWNER",
+    "narendarmallireddy",
+).strip()
+
+TRAIN_ROOT = _resolve_kaggle_input(
+    "DSTNET_TRAIN_ROOT",
+    (
+        Path("/kaggle/input") / _ARGOVERSE_SLUG
+        / "forecasting_train_v1.1/train/data",
+        Path("/kaggle/input/datasets") / _ARGOVERSE_OWNER
+        / _ARGOVERSE_SLUG / "forecasting_train_v1.1/train/data",
+        Path("/kaggle/input") / _ARGOVERSE_OWNER / _ARGOVERSE_SLUG
+        / "forecasting_train_v1.1/train/data",
+    ),
+)
+
+VAL_ROOT = _resolve_kaggle_input(
     "DSTNET_VAL_ROOT",
-    "/kaggle/input/datasets/narendarmallireddy/"
-    "argoverse1-motion-dataset/"
-    "forecasting_val_v1.1/val/data",
-))
+    (
+        Path("/kaggle/input") / _ARGOVERSE_SLUG
+        / "forecasting_val_v1.1/val/data",
+        Path("/kaggle/input/datasets") / _ARGOVERSE_OWNER
+        / _ARGOVERSE_SLUG / "forecasting_val_v1.1/val/data",
+        Path("/kaggle/input") / _ARGOVERSE_OWNER / _ARGOVERSE_SLUG
+        / "forecasting_val_v1.1/val/data",
+    ),
+)
 
 TEST_ROOT = Path(
     "/kaggle/input/datasets/narendarmallireddy/"
@@ -183,23 +235,52 @@ MAP_ROOT = Path(os.environ.get(
 #
 ###############################################################################
 
-TRAIN_CACHE_ROOT = Path(os.environ.get(
+_CACHE_OWNER = os.environ.get(
+    "DSTNET_KAGGLE_OWNER",
+    "kedaradhikari",
+).strip()
+
+
+def _resolve_cache_root(
+    environment_name: str,
+    dataset_slug: str,
+) -> Path:
+    """Resolve a mounted cache dataset across Kaggle mount layouts."""
+
+    override = os.environ.get(environment_name, "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    candidates = (
+        Path("/kaggle/input") / dataset_slug / "cache",
+        Path("/kaggle/input") / dataset_slug.replace("-", "_") / "cache",
+        Path("/kaggle/input/datasets") / _CACHE_OWNER / dataset_slug / "cache",
+        Path("/kaggle/input/datasets") / _CACHE_OWNER
+        / dataset_slug.replace("-", "_") / "cache",
+        Path("/kaggle/input") / _CACHE_OWNER / dataset_slug / "cache",
+        Path("/kaggle/input") / _CACHE_OWNER
+        / dataset_slug.replace("-", "_") / "cache",
+    )
+    return next(
+        (candidate for candidate in candidates if candidate.is_dir()),
+        candidates[0],
+    )
+
+
+TRAIN_CACHE_ROOT = _resolve_cache_root(
     "DSTNET_TRAIN_CACHE_A",
-    "/kaggle/input/datasets/kedaradhikari/"
-    "dstnet-training-cache-part-1/cache",
-))
+    "av1-train-p1-cache",
+)
 
-TRAIN_ADDITIONAL_CACHE_ROOT = Path(os.environ.get(
+TRAIN_ADDITIONAL_CACHE_ROOT = _resolve_cache_root(
     "DSTNET_TRAIN_CACHE_B",
-    "/kaggle/input/datasets/kedaradhikari/"
-    "dstnet-training-cache-part-2/cache",
-))
+    "av1-train-p2-cache",
+)
 
-VAL_CACHE_ROOT = Path(os.environ.get(
+VAL_CACHE_ROOT = _resolve_cache_root(
     "DSTNET_VAL_CACHE",
-    "/kaggle/input/datasets/kedaradhikari/"
-    "dstnet-validation-cache/cache",
-))
+    "av1-val-cache",
+)
 
 
 ###############################################################################
@@ -260,11 +341,19 @@ DEVICE = torch.device(
     else "cpu"
 )
 
+ALLOW_CPU = os.environ.get(
+    "DSTNET_ALLOW_CPU",
+    "0",
+).strip().lower() in {"1", "true", "yes", "on"}
+
 if torch.cuda.is_available():
 
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cuda.matmul.allow_tf32 = True
+    torch.set_num_threads(
+        max(1, int(os.environ.get("DSTNET_TORCH_THREADS", "1")))
+    )
 
 
 SEED = 42
@@ -337,7 +426,7 @@ SCALER_ENABLED = (
 # Logging
 ###############################################################################
 
-LOG_EVERY = 1000
+LOG_EVERY = max(1, int(os.environ.get("DSTNET_LOG_EVERY", "200")))
 
 
 ###############################################################################
@@ -424,6 +513,24 @@ def count_parameters(
     )
 
 
+def _prediction_to_float32(prediction):
+    """Keep AMP for the model while evaluating losses in float32."""
+
+    if prediction is None:
+        return None
+
+    updates = {
+        field.name: value.float()
+        for field in fields(prediction)
+        if isinstance(
+            (value := getattr(prediction, field.name)),
+            torch.Tensor,
+        )
+        and value.is_floating_point()
+    }
+    return replace(prediction, **updates)
+
+
 def seed_worker(_: int) -> None:
     """Seed Python and NumPy in each DataLoader worker."""
 
@@ -442,6 +549,27 @@ def set_random_seed() -> None:
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(SEED)
+
+
+def validate_runtime() -> None:
+    """Fail early when this Kaggle training job has no GPU attached."""
+
+    if DEVICE.type != "cuda":
+        if ALLOW_CPU:
+            print("CUDA is unavailable; CPU training was explicitly allowed.")
+            return
+        raise RuntimeError(
+            "No CUDA GPU is available. In Kaggle, set Notebook Settings > "
+            "Accelerator to GPU and restart the session. For local debugging "
+            "only, set DSTNET_ALLOW_CPU=1."
+        )
+
+    properties = torch.cuda.get_device_properties(DEVICE)
+    memory_gib = properties.total_memory / (1024**3)
+    print(
+        f"CUDA GPU               : {properties.name} "
+        f"({memory_gib:.1f} GiB)"
+    )
 
 
 ###############################################################################
@@ -511,8 +639,11 @@ class MultiCacheManager:
             for root in cache_roots
         ]
         self._path_by_id: dict[str, Path] = {}
+        self._duplicate_ids: set[str] = set()
         for root in self.cache_roots:
             for path in root.glob("*.pkl"):
+                if path.stem in self._path_by_id:
+                    self._duplicate_ids.add(path.stem)
                 self._path_by_id.setdefault(path.stem, path)
 
     ###########################################################################
@@ -540,14 +671,7 @@ class MultiCacheManager:
     def duplicate_ids(self) -> set[str]:
         """Find IDs copied into more than one shard."""
 
-        seen: set[str] = set()
-        duplicates: set[str] = set()
-        for root in self.cache_roots:
-            for path in root.glob("*.pkl"):
-                if path.stem in seen:
-                    duplicates.add(path.stem)
-                seen.add(path.stem)
-        return duplicates
+        return set(self._duplicate_ids)
 
     ###########################################################################
     # Load
@@ -679,7 +803,9 @@ def validate_cache_roots() -> None:
         if not root.exists():
 
             raise FileNotFoundError(
-                f"{name} does not exist: {root}"
+                f"{name} does not exist: {root}. Attach the Kaggle cache "
+                "dataset to this notebook or set its DSTNET_*_CACHE path "
+                "override."
             )
 
         version_file = root / "VERSION"
@@ -715,11 +841,7 @@ def validate_cache_roots() -> None:
                 f"{manifest_path}"
             )
 
-        pkl_count = len(
-            list(
-                root.glob("*.pkl")
-            )
-        )
+        pkl_count = sum(1 for _ in root.glob("*.pkl"))
 
         print(
             f"{name:<28}: "
@@ -1699,6 +1821,13 @@ def train_one_epoch(
 
     running_loss = 0.0
     supervised_agent_count = 0
+    successful_updates = 0
+    skipped_amp_updates = 0
+    consecutive_skipped_amp_updates = 0
+    max_consecutive_amp_skips = max(
+        1,
+        int(os.environ.get("DSTNET_MAX_CONSECUTIVE_AMP_SKIPS", "25")),
+    )
 
     num_batches = len(dataloader)
 
@@ -1748,7 +1877,7 @@ def train_one_epoch(
         )
 
         #######################################################################
-        # Forward + loss
+        # Forward
         #######################################################################
 
         amp_context = (
@@ -1800,57 +1929,53 @@ def train_one_epoch(
                 ),
             )
 
-            supervision_mask = batch.get(
-                "future_mask",
-                batch.get("agent_mask"),
-            )
-            if (
-                supervision_mask is not None
-                and "agent_mask" in batch
-            ):
-                supervision_mask = (
-                    supervision_mask
-                    & batch["agent_mask"].bool()
-                )
 
-            (
-                coarse_prediction,
-                refined_prediction,
-                ground_truth,
-            ) = select_supervised_agents(
-                coarse_prediction,
-                refined_prediction,
-                batch["future_trajectories"],
-                supervision_mask,
-                validate_non_empty=False,
+        supervision_mask = batch.get(
+            "future_mask",
+            batch.get("agent_mask"),
+        )
+        if (
+            supervision_mask is not None
+            and "agent_mask" in batch
+        ):
+            supervision_mask = (
+                supervision_mask
+                & batch["agent_mask"].bool()
             )
 
-            losses = criterion(
+        (
+            coarse_prediction,
+            refined_prediction,
+            ground_truth,
+        ) = select_supervised_agents(
+            coarse_prediction,
+            refined_prediction,
+            batch["future_trajectories"],
+            supervision_mask,
+            validate_non_empty=False,
+        )
 
-                prediction=(
-                    coarse_prediction
-                ),
+        # AMP substantially speeds up the DSTNet forward/backward passes.
+        # The trajectory losses use full precision to avoid overflow and
+        # preserve useful gradients, especially on Kaggle's FP16 GPUs.
+        coarse_prediction = _prediction_to_float32(coarse_prediction)
+        refined_prediction = _prediction_to_float32(refined_prediction)
+        ground_truth = ground_truth.float()
 
-                refined_prediction=(
-                    refined_prediction
-                ),
+        losses = criterion(
+            prediction=coarse_prediction,
+            refined_prediction=refined_prediction,
+            ground_truth=ground_truth,
+        )
 
-                ground_truth=(
-                    ground_truth
-                ),
-            )
-
-            loss = losses[
-                "loss"
-            ]
+        loss = losses["loss"]
 
         #######################################################################
         # Loss sanity check
         #######################################################################
 
-        if FINITE_CHECKS_ENABLED and not torch.isfinite(
-            loss
-        ).all():
+        loss_value = loss.detach().float().item()
+        if not np.isfinite(loss_value):
 
             print()
             print("=" * 80)
@@ -1867,7 +1992,7 @@ def train_one_epoch(
 
             print(
                 f"Loss  : "
-                f"{loss.detach().item()}"
+                f"{loss_value}"
             )
 
             raise FloatingPointError(
@@ -1910,21 +2035,42 @@ def train_one_epoch(
 
         if SCALER_ENABLED:
 
+            previous_scale = scaler.get_scale()
+
             scaler.step(
                 optimizer
             )
 
             scaler.update()
 
+            did_update = scaler.get_scale() >= previous_scale
+
+            if did_update:
+                successful_updates += 1
+                consecutive_skipped_amp_updates = 0
+            else:
+                skipped_amp_updates += 1
+                consecutive_skipped_amp_updates += 1
+                if consecutive_skipped_amp_updates >= max_consecutive_amp_skips:
+                    raise FloatingPointError(
+                        "FP16 GradScaler skipped "
+                        f"{consecutive_skipped_amp_updates} consecutive updates. "
+                        "Try a smaller DSTNET_BATCH_SIZE or use a GPU with "
+                        "BF16 support."
+                    )
+
         else:
 
             optimizer.step()
+            successful_updates += 1
 
         #######################################################################
         # Scheduler
         #######################################################################
 
-        if scheduler is not None:
+        if scheduler is not None and (
+            not SCALER_ENABLED or did_update
+        ):
 
             scheduler.step()
 
@@ -1953,8 +2099,6 @@ def train_one_epoch(
             or batch_index % LOG_EVERY == 0
             or batch_index == num_batches
         ):
-
-            loss_value = loss.detach().float().item()
 
             print(
 
@@ -1988,6 +2132,11 @@ def train_one_epoch(
         (running_loss / max(1, supervised_agent_count)).item()
     )
 
+    if successful_updates == 0:
+        raise FloatingPointError(
+            "No optimizer updates succeeded during this epoch."
+        )
+
     print()
 
     print(
@@ -2001,6 +2150,12 @@ def train_one_epoch(
         f"{epoch_time:.2f} s",
         flush=True,
     )
+
+    if skipped_amp_updates:
+        print(
+            f"AMP updates skipped : {skipped_amp_updates:,}",
+            flush=True,
+        )
 
     return average_loss
 
@@ -2176,6 +2331,8 @@ def print_epoch_summary(
 
 
 def run_training() -> None:
+
+    validate_runtime()
 
     set_random_seed()
 

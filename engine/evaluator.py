@@ -187,7 +187,7 @@ class Evaluator:
         Returns
         -------
         dict[str, float]
-            Mean evaluation metrics over all batches.
+            Mean evaluation metrics over all valid target agents.
 
         Raises
         ------
@@ -199,7 +199,7 @@ class Evaluator:
 
         running: dict[str, float] = {}
 
-        total_scenes = 0
+        total_valid_agents = 0
 
         #######################################################################
         # Required batch fields
@@ -330,9 +330,19 @@ class Evaluator:
             # Convert and validate metrics
             ###################################################################
 
-            batch_scenes = int(
-                batch["future_trajectories"].shape[0]
-            )
+            if metric_mask is None:
+                batch_valid_agents = int(
+                    batch["future_trajectories"].shape[0]
+                    * batch["future_trajectories"].shape[1]
+                )
+            else:
+                batch_valid_agents = int(metric_mask.sum().item())
+
+            if batch_valid_agents == 0:
+                raise RuntimeError(
+                    "Validation batch has no target agents with complete "
+                    "future labels."
+                )
 
             for key, value in (
                 batch_metrics.items()
@@ -350,16 +360,16 @@ class Evaluator:
                         str(key),
                         0.0,
                     )
-                    + metric_value * batch_scenes
+                    + metric_value * batch_valid_agents
                 )
 
-            total_scenes += batch_scenes
+            total_valid_agents += batch_valid_agents
 
         #######################################################################
         # Empty dataloader
         #######################################################################
 
-        if total_scenes == 0:
+        if total_valid_agents == 0:
 
             raise RuntimeError(
                 "Evaluation DataLoader produced zero batches."
@@ -370,7 +380,7 @@ class Evaluator:
         #######################################################################
 
         metrics = {
-            key: value / float(total_scenes)
+            key: value / float(total_valid_agents)
             for key, value in running.items()
         }
 

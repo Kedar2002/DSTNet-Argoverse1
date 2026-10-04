@@ -299,7 +299,8 @@ variable. `--output-root` and `--max-cache-gb` can also be overridden.
 ## Run training
 
 Attach all three published cache datasets and the Argoverse CSV datasets to
-the training notebook, then run:
+the training notebook. Set its Accelerator to GPU, restart the session, and
+run:
 
 ```bash
 python scripts/train_kaggle.py
@@ -326,20 +327,23 @@ batch size further if the selected Kaggle GPU runs out of memory.
 By default the trainer expects these input paths:
 
 ```text
-/kaggle/input/datasets/kedaradhikari/dstnet-training-cache-part-1/cache
-/kaggle/input/datasets/kedaradhikari/dstnet-training-cache-part-2/cache
-/kaggle/input/datasets/kedaradhikari/dstnet-validation-cache/cache
+/kaggle/input/av1-train-p1-cache/cache
+/kaggle/input/av1-train-p2-cache/cache
+/kaggle/input/av1-val-cache/cache
 ```
 
-Override the paths with `DSTNET_TRAIN_CACHE_A`, `DSTNET_TRAIN_CACHE_B`, and
-`DSTNET_VAL_CACHE` if the published dataset slugs differ. Before training,
-the script checks cache versions, manifests, missing or extra sequence IDs,
-and overlap between training shards. Set `DSTNET_VALIDATE_FINITE=1` to turn
-on the detailed per-layer numerical checks; they are off by default in the
-Kaggle entry point to avoid synchronizing the GPU after every tensor check.
+The trainer also detects Kaggle's owner-nested mount layout. Override cache
+paths with `DSTNET_TRAIN_CACHE_A`, `DSTNET_TRAIN_CACHE_B`, and
+`DSTNET_VAL_CACHE` if needed. Before training, it checks cache versions,
+manifests, missing or extra sequence IDs, and overlap between training
+shards. It requires a CUDA GPU by default; `DSTNET_ALLOW_CPU=1` is available
+for local debugging. Set `DSTNET_VALIDATE_FINITE=1` for detailed per-layer
+numerical checks. The trainer always checks each loss and each validation
+metric for finite values, and it reports repeated skipped FP16 updates.
 
 Useful run-time overrides include `DSTNET_BATCH_SIZE`, `DSTNET_NUM_WORKERS`,
-`DSTNET_EPOCHS`, `DSTNET_LEARNING_RATE`, and `DSTNET_VALIDATE_EVERY`.
+`DSTNET_EPOCHS`, `DSTNET_LEARNING_RATE`, `DSTNET_VALIDATE_EVERY`, and
+`DSTNET_LOG_EVERY`.
 
 ---
 
