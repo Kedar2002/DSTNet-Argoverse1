@@ -16,6 +16,8 @@ Output Batch
     "headings": (B,N)
     "graph": list[SceneGraph]
     "agent_mask": (B,N)
+    "future_mask": (B,N)
+    "target_agent_mask": (B,N)
     "map_mask": (B,L)
     "metadata": dict
 }
@@ -163,6 +165,22 @@ def _allocate_agent_arrays(
             ),
             dtype=bool,
         ),
+
+        "future_mask": np.zeros(
+            (
+                batch_size,
+                max_agents,
+            ),
+            dtype=bool,
+        ),
+
+        "target_agent_mask": np.zeros(
+            (
+                batch_size,
+                max_agents,
+            ),
+            dtype=bool,
+        ),
     }
 
 
@@ -279,6 +297,10 @@ def _collate_agents(
         "positions": (B,N,2)
         "headings": (B,N)
         "agent_mask": (B,N)
+
+        "future_mask": (B,N)
+
+        "target_agent_mask": (B,N)
     }
     """
 
@@ -330,6 +352,11 @@ def _collate_agents(
                 agent_index,
             ] = future
 
+            arrays["future_mask"][
+                batch_index,
+                agent_index,
+            ] = len(agent["future"]) >= PREDICTION_STEPS
+
             ###################################################################
             # Current position
             #
@@ -369,6 +396,14 @@ def _collate_agents(
                 agent_index,
             ] = True
 
+            arrays["target_agent_mask"][
+                batch_index,
+                agent_index,
+            ] = (
+                str(agent.get("category", "")).upper()
+                == "AGENT"
+            )
+
     ###########################################################################
     # Convert to tensors
     ###########################################################################
@@ -393,6 +428,16 @@ def _collate_agents(
 
         "agent_mask": torch.as_tensor(
             arrays["agent_mask"],
+            dtype=torch.bool,
+        ),
+
+        "future_mask": torch.as_tensor(
+            arrays["future_mask"],
+            dtype=torch.bool,
+        ),
+
+        "target_agent_mask": torch.as_tensor(
+            arrays["target_agent_mask"],
             dtype=torch.bool,
         ),
 
@@ -557,6 +602,10 @@ def collate_fn(
 
         "agent_mask": (B,N)
 
+        "future_mask": (B,N)
+
+        "target_agent_mask": (B,N)
+
         "map_mask": (B,L)
 
         "metadata": dict
@@ -621,6 +670,12 @@ def collate_fn(
 
         "agent_mask":
             agents["agent_mask"],
+
+        "future_mask":
+            agents["future_mask"],
+
+        "target_agent_mask":
+            agents["target_agent_mask"],
 
         "map_mask":
             maps["map_mask"],

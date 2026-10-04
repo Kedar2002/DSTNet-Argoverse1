@@ -82,6 +82,7 @@ class ScenePreprocessor:
         map_sample_points: int,
         spatial_radius: float,
         map_radius: float,
+        frame_rate: float = 10.0,
     ) -> None:
 
         if observation_steps <= 0:
@@ -99,6 +100,9 @@ class ScenePreprocessor:
                 "map_sample_points must be positive."
             )
 
+        if frame_rate <= 0.0:
+            raise ValueError("frame_rate must be positive.")
+
         self.observation_steps = int(
             observation_steps
         )
@@ -110,6 +114,8 @@ class ScenePreprocessor:
         self.map_sample_points = int(
             map_sample_points
         )
+
+        self.frame_rate = float(frame_rate)
 
         #######################################################################
         # Scene Graph Builder
@@ -267,6 +273,23 @@ class ScenePreprocessor:
             : self.observation_steps
         ]
 
+        target_timestamps = np.asarray(
+            target.timestamps,
+            dtype=np.float64,
+        )
+        observed_timestamps = target_timestamps[
+            : self.observation_steps
+        ]
+
+        if (
+            not np.isfinite(observed_timestamps).all()
+            or np.any(np.diff(observed_timestamps) <= 0)
+        ):
+            raise ValueError(
+                "Prediction target timestamps must be finite and "
+                "strictly increasing over the observation window."
+            )
+
         #######################################################################
         # Local-frame origin
         #######################################################################
@@ -323,6 +346,17 @@ class ScenePreprocessor:
             dict[str, Any]
         ] = []
 
+        target_track = scene.target_track
+        timeline = np.asarray(
+            target_track.timestamps,
+            dtype=np.float64,
+        )
+        observed_timestamps = timeline[: self.observation_steps]
+        future_timestamps = timeline[
+            self.observation_steps:
+            self.observation_steps + self.prediction_steps
+        ]
+
         #######################################################################
         # Iterate over tracks
         #######################################################################
@@ -333,19 +367,39 @@ class ScenePreprocessor:
             # Validate observation availability
             ###################################################################
 
-            if len(track.positions) < self.observation_steps:
+            aligned_observed = self._align_positions(
+                track.timestamps,
+                track.positions,
+                observed_timestamps,
+            )
 
-                # A track that does not exist for the complete observation
-                # window cannot produce the fixed N × H representation
-                # required by the current DSTNet implementation.
+            if aligned_observed is None:
+                # Every agent-state graph node at timestep t must refer to
+                # the same timestamp across actors. The encoder has no
+                # per-timestep missing-state mask, so incomplete histories
+                # cannot safely be padded into the graph.
                 continue
+
+            aligned_future = self._align_future_prefix(
+                track.timestamps,
+                track.positions,
+                future_timestamps,
+            )
 
             ###################################################################
             # Normalize trajectory
             ###################################################################
 
-            trajectory = transform_points(
-                track.positions,
+            observed = transform_points(
+                aligned_observed,
+                origin,
+                heading,
+            ).astype(
+                np.float32,
+            )
+
+            future = transform_points(
+                aligned_future,
                 origin,
                 heading,
             ).astype(
@@ -353,41 +407,15 @@ class ScenePreprocessor:
             )
 
             ###################################################################
-            # Observation trajectory
-            ###################################################################
-
-            observed = trajectory[
-                : self.observation_steps
-            ]
-
-            ###################################################################
-            # Future trajectory
-            ###################################################################
-
-            future = trajectory[
-                self.observation_steps:
-                self.observation_steps
-                + self.prediction_steps
-            ]
-
-            ###################################################################
             # Observed timestamps
             ####################################################################
 
-            timestamps = np.asarray(
-                track.timestamps[
-                    : self.observation_steps
-                ],
-                dtype=np.float32,
-            )
-
-            if len(timestamps) != self.observation_steps:
-
-                raise ValueError(
-                    f"Track '{track.track_id}' contains "
-                    f"{len(timestamps)} observed timestamps, "
-                    f"expected {self.observation_steps}."
-                )
+            timestamp_steps = (
+                observed_timestamps - observed_timestamps[0]
+            ) / np.median(np.diff(observed_timestamps))
+            timestamps = (
+                timestamp_steps / self.frame_rate
+            ).astype(np.float32)
 
             ###################################################################
             # Motion features
@@ -439,9 +467,7 @@ class ScenePreprocessor:
 
                     "observed": observed,
 
-                    "future": future.astype(
-                        np.float32,
-                    ),
+                    "future": future,
 
                     ################################################################
                     # Temporal information
@@ -496,6 +522,69 @@ class ScenePreprocessor:
             )
 
         return processed_agents
+
+    @staticmethod
+    def _timestamp_indices(
+        timestamps: np.ndarray,
+        requested: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Find exact timeline rows, allowing CSV float roundoff only."""
+
+        timestamps = np.asarray(timestamps, dtype=np.float64)
+        requested = np.asarray(requested, dtype=np.float64)
+        indices = np.searchsorted(timestamps, requested)
+        in_bounds = indices < len(timestamps)
+        safe_indices = np.minimum(indices, max(0, len(timestamps) - 1))
+
+        if len(timestamps) == 0:
+            return indices, np.zeros(requested.shape, dtype=bool)
+
+        matched = in_bounds & np.isclose(
+            timestamps[safe_indices],
+            requested,
+            rtol=0.0,
+            atol=1e-6,
+        )
+        return indices, matched
+
+    @classmethod
+    def _align_positions(
+        cls,
+        timestamps: np.ndarray,
+        positions: np.ndarray,
+        requested: np.ndarray,
+    ) -> np.ndarray | None:
+        """Return positions at every requested timestamp, or None if absent."""
+
+        indices, matched = cls._timestamp_indices(
+            timestamps,
+            requested,
+        )
+        if not matched.all():
+            return None
+        return np.asarray(positions, dtype=np.float32)[indices]
+
+    @classmethod
+    def _align_future_prefix(
+        cls,
+        timestamps: np.ndarray,
+        positions: np.ndarray,
+        requested: np.ndarray,
+    ) -> np.ndarray:
+        """Return a consecutive future prefix so gaps never shift labels."""
+
+        if len(requested) == 0:
+            return np.empty((0, 2), dtype=np.float32)
+
+        indices, matched = cls._timestamp_indices(
+            timestamps,
+            requested,
+        )
+        missing = np.flatnonzero(~matched)
+        prefix_length = int(missing[0]) if len(missing) else len(requested)
+        return np.asarray(positions, dtype=np.float32)[
+            indices[:prefix_length]
+        ]
 
     ###########################################################################
     # Map Processing

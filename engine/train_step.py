@@ -66,6 +66,7 @@ from torch.optim.lr_scheduler import LRScheduler
 
 from engine.utils import (
     move_to_device,
+    select_supervised_agents,
     validate_batch,
 )
 
@@ -375,6 +376,30 @@ class TrainStep:
             self._forward(batch)
         )
 
+        supervision_mask = batch.get(
+            "future_mask",
+            batch.get("agent_mask"),
+        )
+        if (
+            supervision_mask is not None
+            and "agent_mask" in batch
+        ):
+            supervision_mask = (
+                supervision_mask
+                & batch["agent_mask"].bool()
+            )
+
+        (
+            coarse_prediction,
+            refined_prediction,
+            ground_truth,
+        ) = select_supervised_agents(
+            coarse_prediction,
+            refined_prediction,
+            batch["future_trajectories"],
+            supervision_mask,
+        )
+
         #######################################################################
         # Complete objective
         #######################################################################
@@ -382,7 +407,7 @@ class TrainStep:
         losses = self.criterion(
             coarse_prediction,
             refined_prediction,
-            batch["future_trajectories"],
+            ground_truth,
         )
 
         self._validate_required_outputs(

@@ -56,6 +56,7 @@ from __future__ import annotations
 import math
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 from torch import Tensor, nn
 
 from models.layers.mlp import MLP
@@ -347,21 +348,21 @@ class ContextEncoder(nn.Module):
                 "anchors must contain floating-point values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             scene_features,
         ).all():
             raise ValueError(
                 "scene_features contains NaN or infinite values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             anchors,
         ).all():
             raise ValueError(
                 "anchors contains NaN or infinite values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             radii,
         ).all():
             raise ValueError(
@@ -718,7 +719,7 @@ class ContextEncoder(nn.Module):
                 f"got {tuple(context.shape)}."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             context,
         ).all():
             raise RuntimeError(

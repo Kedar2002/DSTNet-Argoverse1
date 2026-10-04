@@ -119,6 +119,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 from torch import Tensor, nn
 
 from models.layers.attention import MultiHeadAttention
@@ -815,7 +816,7 @@ class Refinement(nn.Module):
                 "z_stm must contain floating-point values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             z_stm,
         ).all():
             raise ValueError(
@@ -882,7 +883,7 @@ class Refinement(nn.Module):
                 "(B,N,H,K) matching trajectories."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             trajectories,
         ).all():
             raise ValueError(
@@ -890,7 +891,7 @@ class Refinement(nn.Module):
                 "NaN or infinite values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             probabilities,
         ).all():
             raise ValueError(
@@ -1008,7 +1009,7 @@ class Refinement(nn.Module):
                 f"{tuple(anchor_context.shape)}."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             anchor_context,
         ).all():
             raise RuntimeError(
@@ -1502,7 +1503,7 @@ class Refinement(nn.Module):
         # Numerical validation
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             refined,
         ).all():
             raise FloatingPointError(
@@ -1510,7 +1511,7 @@ class Refinement(nn.Module):
                 "trajectory values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             total_offsets,
         ).all():
             raise FloatingPointError(
@@ -1518,7 +1519,7 @@ class Refinement(nn.Module):
                 "offset values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             probabilities,
         ).all():
             raise FloatingPointError(
@@ -1526,7 +1527,7 @@ class Refinement(nn.Module):
                 "non-finite values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             trajectory_history_tensor,
         ).all():
             raise FloatingPointError(
@@ -1534,7 +1535,7 @@ class Refinement(nn.Module):
                 "non-finite values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             refinement_score_history_tensor,
         ).all():
             raise FloatingPointError(

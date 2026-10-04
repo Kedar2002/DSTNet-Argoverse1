@@ -55,7 +55,10 @@ from engine.checkpoint import (
     save_checkpoint,
 )
 from engine.train_step import TrainStep
-from engine.utils import move_to_device
+from engine.utils import (
+    move_to_device,
+    select_supervised_agents,
+)
 
 
 class Trainer:
@@ -368,12 +371,34 @@ class Trainer:
                 )
             )
 
+            supervision_mask = batch.get(
+                "future_mask",
+                batch.get("agent_mask"),
+            )
+            if (
+                supervision_mask is not None
+                and "agent_mask" in batch
+            ):
+                supervision_mask = (
+                    supervision_mask
+                    & batch["agent_mask"].bool()
+                )
+
+            (
+                coarse_prediction,
+                refined_prediction,
+                ground_truth,
+            ) = select_supervised_agents(
+                coarse_prediction,
+                refined_prediction,
+                batch["future_trajectories"],
+                supervision_mask,
+            )
+
             losses = self.criterion(
                 coarse_prediction,
                 refined_prediction,
-                batch[
-                    "future_trajectories"
-                ],
+                ground_truth,
             )
 
             if not isinstance(

@@ -89,6 +89,7 @@ from __future__ import annotations
 from typing import Sequence
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 from torch import Tensor, nn
 
 from datasets.scene_data import SceneGraph
@@ -560,7 +561,7 @@ class DSTNet(nn.Module):
                 f"got {tuple(z_stm.shape)}."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             z_stm
         ).all():
             raise FloatingPointError(
@@ -587,14 +588,14 @@ class DSTNet(nn.Module):
         # Coarse prediction validation
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             coarse_prediction.trajectories
         ).all():
             raise FloatingPointError(
                 "Decoder produced non-finite trajectories."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             coarse_prediction.probabilities
         ).all():
             raise FloatingPointError(
@@ -629,21 +630,21 @@ class DSTNet(nn.Module):
             # Refined prediction validation
             ###################################################################
 
-            if not torch.isfinite(
+            if FINITE_CHECKS_ENABLED and not torch.isfinite(
                 refined_prediction.trajectories
             ).all():
                 raise FloatingPointError(
                     "Refinement produced non-finite trajectories."
                 )
 
-            if not torch.isfinite(
+            if FINITE_CHECKS_ENABLED and not torch.isfinite(
                 refined_prediction.scores
             ).all():
                 raise FloatingPointError(
                     "Refinement produced non-finite scores."
                 )
 
-            if not torch.isfinite(
+            if FINITE_CHECKS_ENABLED and not torch.isfinite(
                 refined_prediction.offsets
             ).all():
                 raise FloatingPointError(

@@ -140,16 +140,14 @@ class ClassificationLoss(nn.Module):
             )
 
         #######################################################################
-        # Cross entropy expects:
-        #
-        # logits  -> (samples, classes)
-        # target  -> (samples,)
+        # NLL loss expects log-probabilities shaped as
+        # (samples, classes) and targets shaped as (samples,).
         #######################################################################
 
-        logits = scores.reshape(
+        probabilities = scores.reshape(
             B * N * H,
             K,
-        )
+        ).float()
 
         target = best_mode.reshape(
             B * N * H,
@@ -159,8 +157,14 @@ class ClassificationLoss(nn.Module):
         # Eq. (32)
         #######################################################################
 
-        return F.cross_entropy(
-            logits,
+        # Prediction.scores is a backward-compatible alias for the decoder's
+        # normalized probabilities, not raw logits. NLL on log-probabilities
+        # gives the intended cross-entropy objective without applying a
+        # second softmax to those probabilities.
+        log_probabilities = probabilities.clamp_min(1e-8).log()
+
+        return F.nll_loss(
+            log_probabilities,
             target,
         )
 

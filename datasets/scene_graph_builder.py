@@ -135,8 +135,8 @@ class SceneGraph:
 
     Temporal value associated with each state.
 
-    The original timestamp is preserved when available. The
-    timestep index is used as a fallback.
+    Relative elapsed time in seconds, converted by preprocessing to a
+    numerically stable scale.
     """
 
     state_positions: np.ndarray

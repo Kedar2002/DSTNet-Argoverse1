@@ -78,6 +78,7 @@ tensor so that they remain device- and dtype-compatible.
 from __future__ import annotations
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 from torch import Tensor, nn
 
 from models.model_types import (
@@ -256,7 +257,7 @@ class TotalLoss(nn.Module):
                 f"Got shape {tuple(value.shape)}."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             value,
         ).all():
             raise RuntimeError(
@@ -416,7 +417,7 @@ class TotalLoss(nn.Module):
                 f"Got shape {tuple(ground_truth.shape)}."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             ground_truth,
         ).all():
 
@@ -448,7 +449,7 @@ class TotalLoss(nn.Module):
                 "torch.Tensor."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             prediction.trajectories,
         ).all():
 
@@ -457,7 +458,7 @@ class TotalLoss(nn.Module):
                 "or infinite values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             prediction.probabilities,
         ).all():
 
@@ -655,7 +656,7 @@ class TotalLoss(nn.Module):
                     "a torch.Tensor."
                 )
 
-            if not torch.isfinite(
+            if FINITE_CHECKS_ENABLED and not torch.isfinite(
                 value,
             ).all():
 

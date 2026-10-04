@@ -6,14 +6,14 @@ Kaggle training entry point for the current DSTNet implementation.
 Purpose
 -------
 Runs production-style training on the Kaggle Argoverse-1 dataset while
-using preprocessed SceneData caches whenever available.
+using versioned preprocessed SceneData caches.
 
 Training cache sources
 ----------------------
 Training scenes are loaded from two persistent Kaggle datasets:
 
-    1. dstnet-training-cache-checkpoints
-    2. dstnet-additional-cache
+    1. dstnet-training-cache-part-1
+    2. dstnet-training-cache-part-2
 
 The first cache is checked first. If a sequence is not present there,
 the additional training cache is checked.
@@ -22,9 +22,9 @@ Validation scenes are loaded from:
 
     dstnet-validation-cache
 
-The original Argoverse CSV directories remain configured as fallback
-sources. Therefore, a missing cache file will cause the normal
-parse -> transform -> preprocess -> cache path to be used.
+All required scene IDs are checked against the mounted cache shards before
+training begins. Cache generation is handled by
+``scripts/prepare_kaggle_cache.py``.
 
 Current model/data terminology
 ------------------------------
@@ -51,33 +51,40 @@ checkpoint there every ``EXTERNAL_SAVE_EVERY`` epochs.
 
 Cache
 -----
-The persistent Kaggle caches are read-only.
-
-New fallback-preprocessed scenes, if any, are written into the local
-``CACHE_ROOT`` working directory.
+The persistent Kaggle caches are read-only and must use the current cache
+format. Startup verifies cache versions, scene coverage, and shard overlap.
 """
 
 from __future__ import annotations
 
 import csv
+import json
 import os
+import random
 import shutil
 import sys
 import time
 from pathlib import Path
 import pickle
+from contextlib import nullcontext
 
 import warnings
+
+import numpy as np
 
 os.environ.setdefault(
     "PYTORCH_ALLOC_CONF",
     "expandable_segments:True",
 )
+os.environ.setdefault(
+    "DSTNET_VALIDATE_FINITE",
+    "0",
+)
 
 import torch
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 
 ###############################################################################
@@ -101,20 +108,24 @@ if str(PROJECT_ROOT) not in sys.path:
 ###############################################################################
 
 from datasets.argoverse_dataset import ArgoverseDataset
-from datasets.cache_manager import CacheManager
+from datasets.augmentation import RandomReflectionDataset
+from datasets.cache_config import (
+    CACHE_VERSION,
+    KAGGLE_PREPROCESSING_CONFIG,
+)
 from datasets.collate import collate_fn
-from datasets.map_loader import MapLoader
-from datasets.preprocess import ScenePreprocessor
-from datasets.scene_parser import SceneParser
 from datasets.transforms import (
     build_eval_transform,
-    build_train_transform,
 )
 
 from engine.evaluator import Evaluator
 from engine.optimizer import build_optimizer
 from engine.scheduler import build_scheduler
-from engine.utils import move_to_device
+from engine.utils import (
+    move_to_device,
+    select_supervised_agents,
+)
+from utils.numerics import FINITE_CHECKS_ENABLED
 
 from losses.total_loss import TotalLoss
 
@@ -125,17 +136,19 @@ from models.dstnet import DSTNet
 # Kaggle Dataset Paths
 ###############################################################################
 
-TRAIN_ROOT = Path(
+TRAIN_ROOT = Path(os.environ.get(
+    "DSTNET_TRAIN_ROOT",
     "/kaggle/input/datasets/narendarmallireddy/"
     "argoverse1-motion-dataset/"
-    "forecasting_train_v1.1/train/data"
-)
+    "forecasting_train_v1.1/train/data",
+))
 
-VAL_ROOT = Path(
+VAL_ROOT = Path(os.environ.get(
+    "DSTNET_VAL_ROOT",
     "/kaggle/input/datasets/narendarmallireddy/"
     "argoverse1-motion-dataset/"
-    "forecasting_val_v1.1/val/data"
-)
+    "forecasting_val_v1.1/val/data",
+))
 
 TEST_ROOT = Path(
     "/kaggle/input/datasets/narendarmallireddy/"
@@ -143,11 +156,12 @@ TEST_ROOT = Path(
     "forecasting_test_v1.1/test_obs/data"
 )
 
-MAP_ROOT = Path(
+MAP_ROOT = Path(os.environ.get(
+    "DSTNET_MAP_ROOT",
     "/kaggle/input/datasets/kedaradhikari/"
     "argoverse1-hd-mapss/"
-    "hd_maps/map_files"
-)
+    "hd_maps/map_files",
+))
 
 
 ###############################################################################
@@ -169,45 +183,43 @@ MAP_ROOT = Path(
 #
 ###############################################################################
 
-TRAIN_CACHE_ROOT = Path(
+TRAIN_CACHE_ROOT = Path(os.environ.get(
+    "DSTNET_TRAIN_CACHE_A",
     "/kaggle/input/datasets/kedaradhikari/"
-    "dstnet-training-cache-checkpoints/"
-    "cache"
-)
+    "dstnet-training-cache-part-1/cache",
+))
 
-TRAIN_ADDITIONAL_CACHE_ROOT = Path(
+TRAIN_ADDITIONAL_CACHE_ROOT = Path(os.environ.get(
+    "DSTNET_TRAIN_CACHE_B",
     "/kaggle/input/datasets/kedaradhikari/"
-    "dstnet-additional-cache/"
-    "cache"
-)
+    "dstnet-training-cache-part-2/cache",
+))
 
-VAL_CACHE_ROOT = Path(
+VAL_CACHE_ROOT = Path(os.environ.get(
+    "DSTNET_VAL_CACHE",
     "/kaggle/input/datasets/kedaradhikari/"
-    "dstnet-validation-cache"
-)
+    "dstnet-validation-cache/cache",
+))
 
 
 ###############################################################################
 # Kaggle Working Directories
 ###############################################################################
 
-CHECKPOINT_ROOT = (
-    Path(
-        "/kaggle/working/checkpoints"
-    )
-)
+CHECKPOINT_ROOT = Path(os.environ.get(
+    "DSTNET_CHECKPOINT_ROOT",
+    "/kaggle/working/checkpoints",
+))
 
-LOG_ROOT = (
-    Path(
-        "/kaggle/working/logs"
-    )
-)
+LOG_ROOT = Path(os.environ.get(
+    "DSTNET_LOG_ROOT",
+    "/kaggle/working/logs",
+))
 
-RESULTS_ROOT = (
-    Path(
-        "/kaggle/working/results"
-    )
-)
+RESULTS_ROOT = Path(os.environ.get(
+    "DSTNET_RESULTS_ROOT",
+    "/kaggle/working/results",
+))
 
 # ---------------------------------------------------------------------------
 # Local fallback cache.
@@ -239,31 +251,6 @@ EXTERNAL_SAVE_EVERY = 5
 
 
 ###############################################################################
-# Directories
-###############################################################################
-
-CHECKPOINT_ROOT.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-LOG_ROOT.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-RESULTS_ROOT.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-# CACHE_ROOT.mkdir(
-#     parents=True,
-#     exist_ok=True,
-# )
-
-
-###############################################################################
 # Training Configuration
 ###############################################################################
 
@@ -276,25 +263,47 @@ DEVICE = torch.device(
 if torch.cuda.is_available():
 
     torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = True
 
 
-BATCH_SIZE = 3
+SEED = 42
 
-NUM_WORKERS = 2
+BATCH_SIZE = int(
+    os.environ.get(
+        "DSTNET_BATCH_SIZE",
+        "8",
+    )
+)
 
-EPOCHS = 30
+NUM_WORKERS = int(
+    os.environ.get(
+        "DSTNET_NUM_WORKERS",
+        str(min(4, os.cpu_count() or 2)),
+    )
+)
 
-LEARNING_RATE = 1e-6
+EPOCHS = int(os.environ.get("DSTNET_EPOCHS", "30"))
 
-WEIGHT_DECAY = 1e-2
+LEARNING_RATE = float(os.environ.get("DSTNET_LEARNING_RATE", "1e-4"))
+
+WEIGHT_DECAY = float(os.environ.get("DSTNET_WEIGHT_DECAY", "1e-4"))
 
 SAVE_EVERY = 1
 
-GRADIENT_CLIP = 0.5
+GRADIENT_CLIP = 5.0
 
-VALIDATE_EVERY = 5
+VALIDATE_EVERY = max(
+    1,
+    int(os.environ.get("DSTNET_VALIDATE_EVERY", "1")),
+)
 
-REFINEMENT_ENABLED = False
+REFINEMENT_ENABLED = os.environ.get(
+    "DSTNET_REFINEMENT_ENABLED",
+    "0",
+).strip().lower() in {"1", "true", "yes", "on"}
+
+INIT_CHECKPOINT = os.environ.get("DSTNET_INIT_CHECKPOINT", "").strip()
 
 
 ###############################################################################
@@ -303,7 +312,25 @@ REFINEMENT_ENABLED = False
 
 USE_AMP = True
 
-AMP_DTYPE = torch.float32
+AMP_DTYPE = (
+    torch.bfloat16
+    if (
+        torch.cuda.is_available()
+        and hasattr(torch.cuda, "is_bf16_supported")
+        and torch.cuda.is_bf16_supported()
+    )
+    else torch.float16
+)
+
+AMP_ENABLED = (
+    USE_AMP
+    and DEVICE.type == "cuda"
+)
+
+SCALER_ENABLED = (
+    AMP_ENABLED
+    and AMP_DTYPE == torch.float16
+)
 
 
 ###############################################################################
@@ -397,28 +424,29 @@ def count_parameters(
     )
 
 
+def seed_worker(_: int) -> None:
+    """Seed Python and NumPy in each DataLoader worker."""
+
+    worker_seed = torch.initial_seed() % (2**32)
+    torch.set_num_threads(1)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+
+def set_random_seed() -> None:
+    """Make shuffling and any worker-side randomness reproducible."""
+
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+
+
 ###############################################################################
 # Scene Preprocessor
 ###############################################################################
-
-
-def build_preprocessor() -> ScenePreprocessor:
-    """
-    Build the current ScenePreprocessor API.
-    """
-
-    return ScenePreprocessor(
-
-        observation_steps=20,
-
-        prediction_steps=30,
-
-        map_sample_points=20,
-
-        spatial_radius=30.0,
-
-        map_radius=30.0,
-    )
 
 
 ###############################################################################
@@ -482,6 +510,10 @@ class MultiCacheManager:
             Path(root)
             for root in cache_roots
         ]
+        self._path_by_id: dict[str, Path] = {}
+        for root in self.cache_roots:
+            for path in root.glob("*.pkl"):
+                self._path_by_id.setdefault(path.stem, path)
 
     ###########################################################################
     # Exists
@@ -492,18 +524,30 @@ class MultiCacheManager:
         sequence_id: str,
     ) -> bool:
 
+        return sequence_id in self._path_by_id
+
+    def ids(self) -> set[str]:
+        """Return all cached scene IDs across the mounted roots."""
+
+        return set(self._path_by_id)
+
+    def missing(self, sequence_ids: list[str]) -> list[str]:
+        """Return requested IDs absent from every mounted cache root."""
+
+        cached = self.ids()
+        return [sequence_id for sequence_id in sequence_ids if sequence_id not in cached]
+
+    def duplicate_ids(self) -> set[str]:
+        """Find IDs copied into more than one shard."""
+
+        seen: set[str] = set()
+        duplicates: set[str] = set()
         for root in self.cache_roots:
-
-            path = (
-                root
-                / f"{sequence_id}.pkl"
-            )
-
-            if path.is_file():
-
-                return True
-
-        return False
+            for path in root.glob("*.pkl"):
+                if path.stem in seen:
+                    duplicates.add(path.stem)
+                seen.add(path.stem)
+        return duplicates
 
     ###########################################################################
     # Load
@@ -523,23 +567,10 @@ class MultiCacheManager:
         inside the read-only Kaggle input dataset.
         """
 
-        for root in self.cache_roots:
-
-            path = (
-                root
-                / f"{sequence_id}.pkl"
-            )
-
-            if not path.is_file():
-
-                continue
-
+        path = self._path_by_id.get(sequence_id)
+        if path is not None:
             try:
-
-                with open(
-                    path,
-                    "rb",
-                ) as file:
+                with open(path, "rb") as file:
 
                     with warnings.catch_warnings():
                         warnings.filterwarnings(
@@ -627,25 +658,61 @@ def validate_cache_roots() -> None:
         (
             "Training cache",
             TRAIN_CACHE_ROOT,
+            "train-1",
         ),
 
         (
             "Additional training cache",
             TRAIN_ADDITIONAL_CACHE_ROOT,
+            "train-2",
         ),
 
         (
             "Validation cache",
             VAL_CACHE_ROOT,
+            "val",
         ),
     ]
 
-    for name, root in cache_roots:
+    for name, root, expected_split in cache_roots:
 
         if not root.exists():
 
             raise FileNotFoundError(
                 f"{name} does not exist: {root}"
+            )
+
+        version_file = root / "VERSION"
+        if not version_file.is_file():
+            raise FileNotFoundError(
+                f"{name} has no VERSION file: {version_file}. "
+                "Regenerate it with scripts/prepare_kaggle_cache.py."
+            )
+
+        cache_version = version_file.read_text(encoding="utf-8").strip()
+        if cache_version != CACHE_VERSION:
+            raise RuntimeError(
+                f"{name} uses cache format {cache_version!r}; "
+                f"expected {CACHE_VERSION!r}. Regenerate this cache."
+            )
+
+        manifest_path = root.parent / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"{name} has no manifest: {manifest_path}. Publish the "
+                "complete output root created by prepare_kaggle_cache.py."
+            )
+        with manifest_path.open(encoding="utf-8") as file:
+            manifest = json.load(file)
+        if (
+            manifest.get("complete") is not True
+            or manifest.get("cache_version") != CACHE_VERSION
+            or manifest.get("split") != expected_split
+            or manifest.get("preprocessing") != KAGGLE_PREPROCESSING_CONFIG
+        ):
+            raise RuntimeError(
+                f"{name} manifest is incomplete or has the wrong split/version: "
+                f"{manifest_path}"
             )
 
         pkl_count = len(
@@ -663,6 +730,12 @@ def validate_cache_roots() -> None:
             f"{'':28}  "
             f"cache files = {pkl_count:,}"
         )
+
+        if manifest.get("scene_count") != pkl_count:
+            raise RuntimeError(
+                f"{name} manifest lists {manifest.get('scene_count')} scenes, "
+                f"but {pkl_count} pickle files are mounted."
+            )
 
         if pkl_count == 0:
 
@@ -711,23 +784,6 @@ def build_dataset(
             f"{root}"
         )
 
-    if not MAP_ROOT.exists():
-
-        raise FileNotFoundError(
-            f"HD map directory does not exist: "
-            f"{MAP_ROOT}"
-        )
-
-    map_loader = MapLoader(
-        map_root=MAP_ROOT,
-    )
-
-    parser = SceneParser(
-        map_loader,
-    )
-
-    preprocessor = build_preprocessor()
-
     ###########################################################################
     # Select persistent cache(s)
     ###########################################################################
@@ -762,15 +818,6 @@ def build_dataset(
     # Transform
     ###########################################################################
 
-    transform = (
-
-        build_train_transform()
-
-        if train
-
-        else build_eval_transform()
-    )
-
     ###########################################################################
     # Dataset
     ###########################################################################
@@ -779,16 +826,41 @@ def build_dataset(
 
         root=root,
 
-        parser=parser,
+        parser=None,
 
-        preprocessor=preprocessor,
+        preprocessor=None,
 
-        transform=transform,
+        transform=build_eval_transform(),
 
         cache=cache,
 
         cache_only=True,
     )
+
+    missing = cache.missing(dataset.sequence_ids)
+    if missing:
+        preview = ", ".join(missing[:10])
+        raise FileNotFoundError(
+            f"{len(missing):,} {('training' if train else 'validation')} "
+            "scenes are missing from the mounted cache(s). First missing "
+            f"IDs: {preview}"
+        )
+
+    unexpected = cache.ids().difference(dataset.sequence_ids)
+    if unexpected:
+        preview = ", ".join(sorted(unexpected)[:10])
+        raise RuntimeError(
+            f"Cache contains {len(unexpected):,} scene IDs that do not "
+            f"belong to this split. First IDs: {preview}"
+        )
+
+    duplicates = cache.duplicate_ids()
+    if duplicates:
+        preview = ", ".join(sorted(duplicates)[:10])
+        raise RuntimeError(
+            f"Cache shards overlap on {len(duplicates):,} scene IDs. "
+            f"First IDs: {preview}"
+        )
 
     return dataset
 
@@ -803,6 +875,14 @@ def build_dataloader(
     *,
     train: bool,
 ) -> DataLoader:
+
+    if train:
+        dataset = RandomReflectionDataset(dataset)
+
+    generator = torch.Generator()
+    generator.manual_seed(
+        SEED + (0 if train else 1)
+    )
 
     kwargs = {
 
@@ -821,6 +901,10 @@ def build_dataloader(
         ),
 
         "drop_last": False,
+
+        "worker_init_fn": seed_worker,
+
+        "generator": generator,
     }
 
     if NUM_WORKERS > 0:
@@ -897,18 +981,29 @@ def build_training_components(
         learning_rate=LEARNING_RATE,
 
         weight_decay=WEIGHT_DECAY,
+
+        foreach=(DEVICE.type == "cuda"),
+    )
+
+    total_updates = max(
+        1,
+        total_steps * EPOCHS,
+    )
+
+    warmup_steps = min(
+        int(total_updates * 0.03),
+        max(0, total_updates - 1),
     )
 
     scheduler = build_scheduler(
 
         optimizer,
 
-        scheduler="cosine",
+        scheduler="warmup_cosine",
 
-        total_steps=(
-            total_steps
-            * EPOCHS
-        ),
+        total_steps=total_updates,
+
+        warmup_steps=warmup_steps,
     )
 
     criterion = TotalLoss(
@@ -961,21 +1056,38 @@ def build_checkpoint_state(
     model: DSTNet,
     optimizer,
     scheduler,
+    scaler: GradScaler | None,
     train_loss: float,
     val_metrics: dict[str, float],
+    best_metric: float | None,
+    steps_per_epoch: int,
 ) -> dict:
 
     return {
 
         "epoch": epoch,
 
+        "model_stage": (
+            "refinement" if REFINEMENT_ENABLED else "backbone"
+        ),
+
+        "refinement_enabled": REFINEMENT_ENABLED,
+
+        "steps_per_epoch": steps_per_epoch,
+
         "train_loss": train_loss,
 
         "val_metrics": val_metrics,
 
-        "best_metric": val_metrics.get(
-            "minADE",
-            float("inf"),
+        "best_metric": (
+            float(best_metric)
+            if best_metric is not None
+            else float(
+                val_metrics.get(
+                    "minADE",
+                    float("inf"),
+                )
+            )
         ),
 
         "model_state_dict": (
@@ -992,6 +1104,12 @@ def build_checkpoint_state(
 
             if scheduler is not None
 
+            else None
+        ),
+
+        "scaler_state_dict": (
+            scaler.state_dict()
+            if scaler is not None
             else None
         ),
 
@@ -1021,8 +1139,11 @@ def save_checkpoint(
     model: DSTNet,
     optimizer,
     scheduler,
+    scaler: GradScaler | None = None,
     train_loss: float,
     val_metrics: dict[str, float],
+    best_metric: float | None = None,
+    steps_per_epoch: int = 0,
     best: bool = False,
 ) -> Path:
 
@@ -1036,22 +1157,32 @@ def save_checkpoint(
 
         scheduler=scheduler,
 
+        scaler=scaler,
+
         train_loss=train_loss,
 
         val_metrics=val_metrics,
+
+        best_metric=best_metric,
+
+        steps_per_epoch=steps_per_epoch,
     )
 
-    torch.save(
-        checkpoint,
-        LATEST_CHECKPOINT,
+    latest_tmp = LATEST_CHECKPOINT.with_suffix(
+        LATEST_CHECKPOINT.suffix + ".tmp"
     )
+
+    torch.save(checkpoint, latest_tmp)
+    os.replace(latest_tmp, LATEST_CHECKPOINT)
 
     if best:
 
-        torch.save(
-            checkpoint,
-            BEST_CHECKPOINT,
+        best_tmp = BEST_CHECKPOINT.with_suffix(
+            BEST_CHECKPOINT.suffix + ".tmp"
         )
+
+        torch.save(checkpoint, best_tmp)
+        os.replace(best_tmp, BEST_CHECKPOINT)
 
     print()
 
@@ -1163,7 +1294,52 @@ def load_checkpoint(
     model: DSTNet,
     optimizer,
     scheduler,
+    scaler: GradScaler | None = None,
+    steps_per_epoch: int = 1,
 ) -> tuple[int, float]:
+
+    if INIT_CHECKPOINT:
+        init_path = Path(INIT_CHECKPOINT)
+        if not init_path.is_file():
+            raise FileNotFoundError(
+                f"DSTNET_INIT_CHECKPOINT does not exist: {init_path}"
+            )
+
+        print_section("Initializing Model Weights")
+        checkpoint = torch.load(init_path, map_location=DEVICE)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        elif isinstance(checkpoint, dict) and "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+
+        incompatible = model.load_state_dict(
+            state_dict,
+            strict=not REFINEMENT_ENABLED,
+        )
+        missing = list(incompatible.missing_keys)
+        unexpected = list(incompatible.unexpected_keys)
+        allowed_missing = (
+            {key for key in model.state_dict() if key.startswith("refinement.")}
+            if REFINEMENT_ENABLED
+            else set()
+        )
+        invalid_missing = set(missing) - allowed_missing
+        if invalid_missing or unexpected:
+            raise RuntimeError(
+                "Initialization checkpoint is incompatible. "
+                f"Missing keys: {sorted(invalid_missing)[:10]}; "
+                f"unexpected keys: {unexpected[:10]}"
+            )
+
+        print(f"Initialized from : {init_path}")
+        if missing:
+            print(
+                f"New refinement parameters: {len(missing):,}; "
+                "optimizer/scheduler state starts fresh."
+            )
+        return 0, float("inf")
 
     if not LATEST_CHECKPOINT.exists():
 
@@ -1188,6 +1364,18 @@ def load_checkpoint(
         LATEST_CHECKPOINT,
         map_location=DEVICE,
     )
+
+    rng_state = checkpoint.get("torch_rng_state")
+    if isinstance(rng_state, torch.Tensor):
+        torch.set_rng_state(rng_state.cpu())
+
+    cuda_rng_states = checkpoint.get("cuda_rng_state_all")
+    if (
+        torch.cuda.is_available()
+        and isinstance(cuda_rng_states, list)
+        and len(cuda_rng_states) == torch.cuda.device_count()
+    ):
+        torch.cuda.set_rng_state_all(cuda_rng_states)
 
     model.load_state_dict(
         checkpoint[
@@ -1214,6 +1402,64 @@ def load_checkpoint(
         scheduler.load_state_dict(
             scheduler_state
         )
+
+    checkpoint_epoch = int(
+        checkpoint.get("epoch", 0)
+    )
+
+    saved_steps_per_epoch = int(
+        checkpoint.get("steps_per_epoch", steps_per_epoch)
+    )
+
+    if (
+        scheduler is not None
+        and hasattr(scheduler, "lr_lambdas")
+        and (
+            "steps_per_epoch" not in checkpoint
+            or saved_steps_per_epoch != steps_per_epoch
+        )
+    ):
+        # A changed batch size changes updates per epoch. Rebase the schedule
+        # to the completed epoch count instead of carrying a stale step count.
+        scheduler.last_epoch = checkpoint_epoch * steps_per_epoch
+        scheduler._step_count = scheduler.last_epoch + 1
+
+    # Optimizer state restores its saved hyperparameters too. Reapply the
+    # current Kaggle run's LR/decay while retaining Adam's moment estimates.
+    for group_index, group in enumerate(optimizer.param_groups):
+        group["initial_lr"] = LEARNING_RATE
+        group["weight_decay"] = (
+            WEIGHT_DECAY
+            if group_index == 0
+            else 0.0
+        )
+
+    if scheduler is not None and hasattr(scheduler, "lr_lambdas"):
+        scheduler.base_lrs = [
+            LEARNING_RATE
+            for _ in optimizer.param_groups
+        ]
+
+        for group, lr_lambda in zip(
+            optimizer.param_groups,
+            scheduler.lr_lambdas,
+        ):
+            group["lr"] = (
+                LEARNING_RATE
+                * lr_lambda(scheduler.last_epoch)
+            )
+
+        scheduler._last_lr = [
+            group["lr"]
+            for group in optimizer.param_groups
+        ]
+
+    scaler_state = checkpoint.get(
+        "scaler_state_dict"
+    )
+
+    if scaler is not None and scaler_state:
+        scaler.load_state_dict(scaler_state)
 
     ###########################################################################
     # CPU RNG
@@ -1307,12 +1553,7 @@ def load_checkpoint(
                 f"{exc}"
             )
 
-    epoch = int(
-        checkpoint.get(
-            "epoch",
-            0,
-        )
-    )
+    epoch = checkpoint_epoch
 
     val_metrics = checkpoint.get(
         "val_metrics",
@@ -1457,6 +1698,7 @@ def train_one_epoch(
     model.train()
 
     running_loss = 0.0
+    supervised_agent_count = 0
 
     num_batches = len(dataloader)
 
@@ -1468,8 +1710,6 @@ def train_one_epoch(
 
     epoch_start = time.perf_counter()
 
-    skipped_batches = 0
-
     for batch_index, batch in enumerate(
         dataloader,
         start=1,
@@ -1480,6 +1720,19 @@ def train_one_epoch(
         #######################################################################
         # Move batch
         #######################################################################
+
+        cpu_supervision_mask = batch.get(
+            "future_mask",
+            batch.get("agent_mask"),
+        )
+
+        if (
+            cpu_supervision_mask is not None
+            and not bool(cpu_supervision_mask.any())
+        ):
+            raise RuntimeError(
+                "This batch contains no agents with a complete future label."
+            )
 
         batch = move_to_device(
             batch,
@@ -1498,75 +1751,17 @@ def train_one_epoch(
         # Forward + loss
         #######################################################################
 
-        if USE_AMP:
-
-            with autocast(
+        amp_context = (
+            autocast(
                 device_type=DEVICE.type,
                 dtype=AMP_DTYPE,
                 enabled=True,
-            ):
+            )
+            if AMP_ENABLED
+            else nullcontext()
+        )
 
-                (
-                    coarse_prediction,
-                    refined_prediction,
-                ) = model(
-
-                    agent_trajectories=(
-                        batch[
-                            "agent_trajectories"
-                        ]
-                    ),
-
-                    map_centerlines=(
-                        batch[
-                            "map_centerlines"
-                        ]
-                    ),
-
-                    positions=(
-                        batch[
-                            "positions"
-                        ]
-                    ),
-
-                    graph=(
-                        batch[
-                            "graph"
-                        ]
-                    ),
-
-                    agent_mask=batch.get(
-                        "agent_mask"
-                    ),
-
-                    map_mask=batch.get(
-                        "map_mask"
-                    ),
-                )
-
-                losses = criterion(
-
-                    prediction=(
-                        coarse_prediction
-                    ),
-
-                    refined_prediction=(
-                        refined_prediction
-                    ),
-
-                    ground_truth=(
-                        batch[
-                            "future_trajectories"
-                        ]
-                    ),
-                )
-
-                loss = losses[
-                    "loss"
-                ]
-
-        else:
-
+        with amp_context:
             (
                 coarse_prediction,
                 refined_prediction,
@@ -1605,6 +1800,31 @@ def train_one_epoch(
                 ),
             )
 
+            supervision_mask = batch.get(
+                "future_mask",
+                batch.get("agent_mask"),
+            )
+            if (
+                supervision_mask is not None
+                and "agent_mask" in batch
+            ):
+                supervision_mask = (
+                    supervision_mask
+                    & batch["agent_mask"].bool()
+                )
+
+            (
+                coarse_prediction,
+                refined_prediction,
+                ground_truth,
+            ) = select_supervised_agents(
+                coarse_prediction,
+                refined_prediction,
+                batch["future_trajectories"],
+                supervision_mask,
+                validate_non_empty=False,
+            )
+
             losses = criterion(
 
                 prediction=(
@@ -1616,9 +1836,7 @@ def train_one_epoch(
                 ),
 
                 ground_truth=(
-                    batch[
-                        "future_trajectories"
-                    ]
+                    ground_truth
                 ),
             )
 
@@ -1630,7 +1848,7 @@ def train_one_epoch(
         # Loss sanity check
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             loss
         ).all():
 
@@ -1660,7 +1878,7 @@ def train_one_epoch(
         # Backward
         #######################################################################
 
-        if USE_AMP:
+        if SCALER_ENABLED:
 
             scaler.scale(
                 loss
@@ -1675,107 +1893,6 @@ def train_one_epoch(
             loss.backward()
 
         #######################################################################
-        # Gradient diagnostics
-        #######################################################################
-
-        nonfinite_gradients = []
-
-        max_gradient_value = 0.0
-
-        for name, parameter in (
-            model.named_parameters()
-        ):
-
-            if parameter.grad is None:
-
-                continue
-
-            gradient = parameter.grad
-
-            if not torch.isfinite(
-                gradient
-            ).all():
-
-                nonfinite_gradients.append(
-                    name
-                )
-
-                continue
-
-            current_max = (
-                gradient.detach()
-                .abs()
-                .max()
-                .item()
-            )
-
-            max_gradient_value = max(
-                max_gradient_value,
-                current_max,
-            )
-
-        #######################################################################
-        # Invalid gradients
-        #######################################################################
-
-        if nonfinite_gradients:
-
-            print()
-            print("=" * 80)
-            print(
-                "NON-FINITE GRADIENTS — "
-                "SKIPPING BATCH"
-            )
-            print("=" * 80)
-
-            print(
-                f"Epoch : {epoch}"
-            )
-
-            print(
-                f"Batch : {batch_index}"
-            )
-
-            print(
-                f"Loss  : "
-                f"{loss.detach().item():.8f}"
-            )
-
-            print(
-                f"Affected parameters : "
-                f"{len(nonfinite_gradients)}"
-            )
-
-            for name in (
-                nonfinite_gradients[:10]
-            ):
-
-                print(
-                    f"  {name}"
-                )
-
-            if len(
-                nonfinite_gradients
-            ) > 10:
-
-                print(
-                    f"  ... and "
-                    f"{len(nonfinite_gradients) - 10} more"
-                )
-
-            if USE_AMP:
-
-                scaler.update()
-
-            optimizer.zero_grad(
-                set_to_none=True,
-            )
-
-            skipped_batches += 1
-
-            continue
-
-        #######################################################################
         # Gradient clipping
         #######################################################################
 
@@ -1783,7 +1900,7 @@ def train_one_epoch(
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 max_norm=GRADIENT_CLIP,
-                error_if_nonfinite=True,
+                error_if_nonfinite=not SCALER_ENABLED,
             )
         )
 
@@ -1791,7 +1908,7 @@ def train_one_epoch(
         # Optimizer update
         #######################################################################
 
-        if USE_AMP:
+        if SCALER_ENABLED:
 
             scaler.step(
                 optimizer
@@ -1815,11 +1932,12 @@ def train_one_epoch(
         # Statistics
         #######################################################################
 
-        loss_value = (
-            loss.detach().item()
+        current_agent_count = coarse_prediction.trajectories.shape[1]
+        running_loss += (
+            loss.detach().float()
+            * current_agent_count
         )
-
-        running_loss += loss_value
+        supervised_agent_count += current_agent_count
 
         batch_time = (
             time.perf_counter()
@@ -1836,6 +1954,8 @@ def train_one_epoch(
             or batch_index == num_batches
         ):
 
+            loss_value = loss.detach().float().item()
+
             print(
 
                 f"Epoch {epoch:03d} "
@@ -1846,8 +1966,6 @@ def train_one_epoch(
                 f"loss={loss_value:.6f} "
 
                 f"grad={float(gradient_norm):.4f} "
-
-                f"maxgrad={max_gradient_value:.4e} "
 
                 f"lr="
                 f"{optimizer.param_groups[0]['lr']:.8e} "
@@ -1866,9 +1984,8 @@ def train_one_epoch(
         - epoch_start
     )
 
-    average_loss = (
-        running_loss
-        / num_batches
+    average_loss = float(
+        (running_loss / max(1, supervised_agent_count)).item()
     )
 
     print()
@@ -1882,12 +1999,6 @@ def train_one_epoch(
     print(
         f"Training Epoch Time : "
         f"{epoch_time:.2f} s",
-        flush=True,
-    )
-
-    print(
-        f"Skipped Non-Finite Batches : "
-        f"{skipped_batches}",
         flush=True,
     )
 
@@ -1922,6 +2033,10 @@ def validate_one_epoch(
         dataloader=dataloader,
 
         device=DEVICE,
+
+        autocast_enabled=AMP_ENABLED,
+
+        autocast_dtype=AMP_DTYPE,
     )
 
     start_time = (
@@ -2062,6 +2177,8 @@ def print_epoch_summary(
 
 def run_training() -> None:
 
+    set_random_seed()
+
     create_directories()
 
     initialize_csv()
@@ -2140,7 +2257,7 @@ def run_training() -> None:
 
     scaler = GradScaler(
         device="cuda",
-        enabled=USE_AMP,
+        enabled=SCALER_ENABLED,
     )
 
     ###########################################################################
@@ -2174,6 +2291,10 @@ def run_training() -> None:
         optimizer,
 
         scheduler,
+
+        scaler,
+
+        len(train_loader),
     )
 
     epochs_without_improvement = 0
@@ -2229,10 +2350,12 @@ def run_training() -> None:
             # Validation
             ###################################################################
 
-            if (
+            did_validate = (
                 epoch % VALIDATE_EVERY == 0
                 or epoch == EPOCHS
-            ):
+            )
+
+            if did_validate:
 
                 val_metrics = (
                     validate_one_epoch(
@@ -2298,8 +2421,8 @@ def run_training() -> None:
             )
 
             is_best = (
-                current_metric
-                < best_metric
+                did_validate
+                and current_metric < best_metric
             )
 
             if is_best:
@@ -2318,7 +2441,7 @@ def run_training() -> None:
                     f"{best_metric:.6f})"
                 )
 
-            else:
+            elif did_validate:
 
                 epochs_without_improvement += 1
 
@@ -2348,9 +2471,15 @@ def run_training() -> None:
 
                     scheduler=scheduler,
 
+                    scaler=scaler,
+
                     train_loss=train_loss,
 
                     val_metrics=val_metrics,
+
+                    best_metric=best_metric,
+
+                    steps_per_epoch=len(train_loader),
 
                     best=is_best,
                 )
@@ -2431,6 +2560,8 @@ def run_training() -> None:
 
                 scheduler=scheduler,
 
+                scaler=scaler,
+
                 train_loss=(
 
                     train_loss
@@ -2448,6 +2579,14 @@ def run_training() -> None:
 
                     else {}
                 ),
+
+                best_metric=(
+                    best_metric
+                    if "best_metric" in locals()
+                    else float("inf")
+                ),
+
+                steps_per_epoch=len(train_loader),
 
                 best=False,
             )
@@ -2564,7 +2703,7 @@ def main() -> None:
     )
 
     print(
-        f"Map root               : "
+        f"Map root (cache build) : "
         f"{MAP_ROOT}"
     )
 
@@ -2596,6 +2735,36 @@ def main() -> None:
     print(
         f"Batch size             : "
         f"{BATCH_SIZE}"
+    )
+
+    print(
+        f"DataLoader workers     : "
+        f"{NUM_WORKERS}"
+    )
+
+    print(
+        f"Mixed precision        : "
+        f"{AMP_ENABLED} ({AMP_DTYPE})"
+    )
+
+    print(
+        f"Per-layer finite checks: "
+        f"{FINITE_CHECKS_ENABLED}"
+    )
+
+    print(
+        f"Learning rate          : "
+        f"{LEARNING_RATE:.2e}"
+    )
+
+    print(
+        f"Refinement enabled     : "
+        f"{REFINEMENT_ENABLED}"
+    )
+
+    print(
+        f"Weight initialization  : "
+        f"{INIT_CHECKPOINT or 'resume latest / random initialization'}"
     )
 
     print(

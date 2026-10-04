@@ -179,10 +179,10 @@ Before training, preprocess the dataset.
 python scripts/preprocess.py
 ```
 
-This creates cached tensor files under
+This creates versioned cached `SceneData` pickle files under
 
 ```
-data/argoverse1/cache/
+data/argoverse1/cache_v2/
 ```
 
 which significantly reduces loading time during training.
@@ -262,6 +262,84 @@ The repository follows
 - Object-oriented implementation
 - Minimal hardcoded constants
 - Reproducible experiments
+
+---
+
+# Kaggle Training and Cache Preparation
+
+The Kaggle training entry point is `scripts/train_kaggle.py`. It expects the
+official Argoverse CSV splits for scene indexing and three preprocessed cache
+datasets. The Argoverse 1 HD maps are needed when building caches.
+
+## Build the cache datasets
+
+The corrected preprocessor aligns every actor to the focal agent's timestamps.
+Existing caches were built with the old row-order alignment and must be
+regenerated. The cache builder writes the exact `SceneData` pickle format used
+by the trainer, a `VERSION` file, and a completeness manifest.
+
+Run one command per Kaggle notebook session so each output stays below the
+15 GB `/kaggle/working` limit:
+
+```bash
+python scripts/prepare_kaggle_cache.py --split train-1
+python scripts/prepare_kaggle_cache.py --split train-2
+python scripts/prepare_kaggle_cache.py --split val
+```
+
+Each command creates an output folder under `/kaggle/working` containing
+`cache/` and `manifest.json`. Publish each output folder as a separate Kaggle
+dataset. The two training commands use a deterministic, size-balanced split of
+the complete training CSV directory; the validation command caches the full
+validation split. If Kaggle mounts your Argoverse or map files at different
+paths, pass `--train-root`, `--val-root`, or `--map-root`, or set the matching
+`DSTNET_TRAIN_ROOT`, `DSTNET_VAL_ROOT`, or `DSTNET_MAP_ROOT` environment
+variable. `--output-root` and `--max-cache-gb` can also be overridden.
+
+## Run training
+
+Attach all three published cache datasets and the Argoverse CSV datasets to
+the training notebook, then run:
+
+```bash
+python scripts/train_kaggle.py
+```
+
+For the full two-stage model, first train the backbone with the default
+settings and publish `/kaggle/working/checkpoints/best_model.pth` as a Kaggle
+dataset. In a new run, attach that checkpoint dataset and start the refinement
+stage by setting these variables before launching the script:
+
+```python
+import os
+os.environ["DSTNET_REFINEMENT_ENABLED"] = "1"
+os.environ["DSTNET_INIT_CHECKPOINT"] = "/kaggle/input/<checkpoint-dataset>/best_model.pth"
+os.environ["DSTNET_CHECKPOINT_ROOT"] = "/kaggle/working/refinement-checkpoints"
+os.environ["DSTNET_LOG_ROOT"] = "/kaggle/working/refinement-logs"
+os.environ["DSTNET_BATCH_SIZE"] = "4"
+```
+
+The refinement stage initializes all compatible backbone weights and starts a
+fresh optimizer and learning-rate schedule for its new parameters. Lower the
+batch size further if the selected Kaggle GPU runs out of memory.
+
+By default the trainer expects these input paths:
+
+```text
+/kaggle/input/datasets/kedaradhikari/dstnet-training-cache-part-1/cache
+/kaggle/input/datasets/kedaradhikari/dstnet-training-cache-part-2/cache
+/kaggle/input/datasets/kedaradhikari/dstnet-validation-cache/cache
+```
+
+Override the paths with `DSTNET_TRAIN_CACHE_A`, `DSTNET_TRAIN_CACHE_B`, and
+`DSTNET_VAL_CACHE` if the published dataset slugs differ. Before training,
+the script checks cache versions, manifests, missing or extra sequence IDs,
+and overlap between training shards. Set `DSTNET_VALIDATE_FINITE=1` to turn
+on the detailed per-layer numerical checks; they are off by default in the
+Kaggle entry point to avoid synchronizing the GPU after every tensor check.
+
+Useful run-time overrides include `DSTNET_BATCH_SIZE`, `DSTNET_NUM_WORKERS`,
+`DSTNET_EPOCHS`, `DSTNET_LEARNING_RATE`, and `DSTNET_VALIDATE_EVERY`.
 
 ---
 

@@ -27,7 +27,9 @@ Model output:
     coarse_prediction
     refined_prediction
 
-Evaluation is performed on the refined prediction.
+Evaluation uses the refined prediction when enabled and the coarse
+prediction for backbone-only training. Metrics use the final observed
+state and the valid target-agent labels.
 
 Ground truth:
 
@@ -37,6 +39,7 @@ Ground truth:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -70,6 +73,12 @@ class Evaluator:
 
     device:
         Evaluation device.
+
+    autocast_enabled:
+        Use mixed precision for model inference on CUDA.
+
+    autocast_dtype:
+        Autocast dtype when mixed precision is enabled.
     """
 
     def __init__(
@@ -77,6 +86,8 @@ class Evaluator:
         model: nn.Module,
         dataloader: DataLoader,
         device: torch.device | str = "cpu",
+        autocast_enabled: bool = False,
+        autocast_dtype: torch.dtype = torch.float16,
     ) -> None:
 
         if not isinstance(
@@ -90,6 +101,11 @@ class Evaluator:
         self.model = model
         self.dataloader = dataloader
         self.device = torch.device(device)
+        self.autocast_enabled = bool(
+            autocast_enabled
+            and self.device.type == "cuda"
+        )
+        self.autocast_dtype = autocast_dtype
 
         self.model.to(
             self.device
@@ -183,7 +199,7 @@ class Evaluator:
 
         running: dict[str, float] = {}
 
-        num_batches = 0
+        total_scenes = 0
 
         #######################################################################
         # Required batch fields
@@ -237,8 +253,18 @@ class Evaluator:
             # Model forward
             ###################################################################
 
-            coarse_prediction, refined_prediction = (
-                self.model(
+            amp_context = (
+                torch.autocast(
+                    device_type=self.device.type,
+                    dtype=self.autocast_dtype,
+                    enabled=True,
+                )
+                if self.autocast_enabled
+                else nullcontext()
+            )
+
+            with amp_context:
+                coarse_prediction, refined_prediction = self.model(
                     agent_trajectories=batch[
                         "agent_trajectories"
                     ],
@@ -258,20 +284,38 @@ class Evaluator:
                         "map_mask"
                     ),
                 )
+
+            ###################################################################
+            # Use the refined output when enabled; backbone-only training
+            # evaluates the coarse prediction.
+            ###################################################################
+
+            forecast = (
+                refined_prediction
+                if refined_prediction is not None
+                else coarse_prediction
             )
 
-            ###################################################################
-            # Evaluate refined prediction
-            #
-            # Coarse prediction is intentionally not used here.
-            # The final model output is the refined prediction.
-            ###################################################################
+            metric_mask = batch.get(
+                "target_agent_mask",
+                batch.get("agent_mask"),
+            )
+
+            if (
+                metric_mask is not None
+                and "future_mask" in batch
+            ):
+                metric_mask = (
+                    metric_mask
+                    & batch["future_mask"]
+                )
 
             batch_metrics = compute_metrics(
-                refined_prediction,
+                forecast,
                 batch[
                     "future_trajectories"
                 ],
+                agent_mask=metric_mask,
             )
 
             if not isinstance(
@@ -285,6 +329,10 @@ class Evaluator:
             ###################################################################
             # Convert and validate metrics
             ###################################################################
+
+            batch_scenes = int(
+                batch["future_trajectories"].shape[0]
+            )
 
             for key, value in (
                 batch_metrics.items()
@@ -302,16 +350,16 @@ class Evaluator:
                         str(key),
                         0.0,
                     )
-                    + metric_value
+                    + metric_value * batch_scenes
                 )
 
-            num_batches += 1
+            total_scenes += batch_scenes
 
         #######################################################################
         # Empty dataloader
         #######################################################################
 
-        if num_batches == 0:
+        if total_scenes == 0:
 
             raise RuntimeError(
                 "Evaluation DataLoader produced zero batches."
@@ -322,9 +370,7 @@ class Evaluator:
         #######################################################################
 
         metrics = {
-            key: value / float(
-                num_batches
-            )
+            key: value / float(total_scenes)
             for key, value in running.items()
         }
 

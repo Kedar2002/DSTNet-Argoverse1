@@ -34,6 +34,7 @@ The objective contains:
 from __future__ import annotations
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 import torch.nn.functional as F
 from torch import Tensor, nn
 
@@ -196,7 +197,7 @@ class RefinementLoss(nn.Module):
         # Device / numerical checks
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             refined,
         ).all():
             raise ValueError(
@@ -428,7 +429,7 @@ class RefinementLoss(nn.Module):
 
         for name, value in losses.items():
 
-            if not torch.isfinite(
+            if FINITE_CHECKS_ENABLED and not torch.isfinite(
                 value,
             ).all():
                 raise RuntimeError(

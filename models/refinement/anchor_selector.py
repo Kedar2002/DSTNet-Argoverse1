@@ -55,6 +55,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 from torch import Tensor, nn
 
 
@@ -304,7 +305,7 @@ class AnchorSelector(nn.Module):
                 "trajectories must contain floating-point values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             trajectories,
         ).all():
             raise ValueError(

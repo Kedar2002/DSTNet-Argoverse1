@@ -91,6 +91,7 @@ def build_optimizer(
     weight_decay: float = 1e-2,
     betas: tuple[float, float] = (0.9, 0.999),
     momentum: float = 0.9,
+    foreach: bool | None = None,
 ) -> torch.optim.Optimizer:
     """
     Build optimizer.
@@ -117,6 +118,8 @@ def build_optimizer(
 
             betas=betas,
 
+            foreach=foreach,
+
         )
 
     ###################################################################
@@ -133,6 +136,8 @@ def build_optimizer(
 
             betas=betas,
 
+            foreach=foreach,
+
         )
 
     ###################################################################
@@ -148,6 +153,8 @@ def build_optimizer(
             lr=learning_rate,
 
             momentum=momentum,
+
+            foreach=foreach,
 
         )
 

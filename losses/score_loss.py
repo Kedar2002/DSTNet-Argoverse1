@@ -43,6 +43,7 @@ Ground truth:
 from __future__ import annotations
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 import torch.nn.functional as F
 from torch import Tensor, nn
 
@@ -320,21 +321,21 @@ class ScoreLoss(nn.Module):
         # Numerical validation
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             trajectory_history,
         ).all():
             raise ValueError(
                 "trajectory_history contains NaN or infinite values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             score_history,
         ).all():
             raise ValueError(
                 "refinement_score_history contains NaN or infinite values."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             ground_truth,
         ).all():
             raise ValueError(
@@ -396,7 +397,7 @@ class ScoreLoss(nn.Module):
             dim=-1,
         )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             endpoint_error,
         ).all():
             raise RuntimeError(
@@ -498,7 +499,7 @@ class ScoreLoss(nn.Module):
         # Numerical validation
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             loss,
         ).all():
             raise RuntimeError(

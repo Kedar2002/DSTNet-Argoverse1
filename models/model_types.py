@@ -68,6 +68,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 
 
 ###############################################################################
@@ -682,7 +683,7 @@ class RefinedPrediction:
                     "the initial coarse trajectory Y^(0)."
                 )
 
-            if not torch.isfinite(
+            if FINITE_CHECKS_ENABLED and not torch.isfinite(
                 self.trajectory_history
             ).all():
                 raise ValueError(
@@ -737,7 +738,7 @@ class RefinedPrediction:
                     "least RScore_0."
                 )
 
-            if not torch.isfinite(
+            if FINITE_CHECKS_ENABLED and not torch.isfinite(
                 self.refinement_score_history
             ).all():
                 raise ValueError(

@@ -10,11 +10,11 @@ dataset:
 
   test_dir: "data/argoverse1/test"
 
-  cache_dir: "data/argoverse1/cache"
+  cache_dir: "data/argoverse1/cache_v2"
 
   file_extension: ".csv"
 
-  cache_extension: ".pt"
+  cache_extension: ".pkl"
 
   observation_steps: 20
 
@@ -52,4 +52,4 @@ cache:
 
     rebuild: false
 
-    version: v1
+    version: "2.0"

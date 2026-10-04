@@ -54,8 +54,8 @@ class ArgoverseDataset(Dataset):
     def __init__(
         self,
         root: str | Path,
-        parser: SceneParser,
-        preprocessor: ScenePreprocessor,
+        parser: SceneParser | None,
+        preprocessor: ScenePreprocessor | None,
         transform: Transform | None = None,
         cache: CacheInterface | None = None,
         cache_only: bool = False,
@@ -76,6 +76,14 @@ class ArgoverseDataset(Dataset):
         self.cache = cache
 
         self.cache_only = cache_only
+
+        if (
+            not self.cache_only
+            and (self.parser is None or self.preprocessor is None)
+        ):
+            raise ValueError(
+                "parser and preprocessor are required unless cache_only=True."
+            )
 
         self.files = sorted(
             self.root.glob("*.csv")
@@ -134,6 +142,12 @@ class ArgoverseDataset(Dataset):
         ########################################################################
         # Parse
         ########################################################################
+
+        if self.parser is None or self.preprocessor is None:
+            raise RuntimeError(
+                "CSV parsing is unavailable because parser/preprocessor "
+                "were not configured."
+            )
 
         scene = self.parser.parse(
             csv_path,

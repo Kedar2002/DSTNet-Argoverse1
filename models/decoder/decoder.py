@@ -87,6 +87,7 @@ Notes
 from __future__ import annotations
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 from torch import Tensor, nn
 
 from models.layers.mlp import MLP
@@ -279,7 +280,7 @@ class Decoder(nn.Module):
                 "z_stm must contain floating-point features."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             z_stm,
         ).all():
             raise ValueError(
@@ -355,7 +356,7 @@ class Decoder(nn.Module):
         # Numerical validation
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             trajectories,
         ).all():
             raise RuntimeError(
@@ -445,7 +446,7 @@ class Decoder(nn.Module):
         # Numerical validation
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             probabilities,
         ).all():
             raise RuntimeError(
@@ -457,7 +458,7 @@ class Decoder(nn.Module):
         # Probability validation
         #######################################################################
 
-        if not torch.allclose(
+        if FINITE_CHECKS_ENABLED and not torch.allclose(
             probabilities.sum(dim=-1),
             torch.ones_like(
                 probabilities.sum(dim=-1),

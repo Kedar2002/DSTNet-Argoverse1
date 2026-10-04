@@ -76,6 +76,7 @@ from __future__ import annotations
 import math
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 from torch import Tensor, nn
 
 
@@ -415,7 +416,7 @@ class ARPMSPA(nn.Module):
         # radius calculation.
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             radius
         ).all():
 
@@ -708,7 +709,7 @@ class ARPMSPA(nn.Module):
             )
         )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             bias
         ).all():
 
@@ -844,7 +845,7 @@ class ARPMSPA(nn.Module):
         # Numerical check before dropout.
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             attention
         ).all():
 
@@ -870,7 +871,7 @@ class ARPMSPA(nn.Module):
             value,
         )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             output
         ).all():
 
@@ -972,7 +973,7 @@ class ARPMSPA(nn.Module):
         # Validate input values before attention.
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             scene_embeddings
         ).all():
 
@@ -980,7 +981,7 @@ class ARPMSPA(nn.Module):
                 "ARP-MSPA received non-finite scene embeddings."
             )
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             positions
         ).all():
 
@@ -1180,7 +1181,7 @@ class ARPMSPA(nn.Module):
         # Final numerical check.
         #######################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             output
         ).all():
 

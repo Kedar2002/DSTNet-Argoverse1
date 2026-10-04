@@ -15,9 +15,7 @@ import shutil
 from pathlib import Path
 
 from datasets.scene_data import SceneData
-
-
-CACHE_VERSION = "1.0"
+from datasets.cache_config import CACHE_VERSION
 
 
 class CacheManager:
@@ -41,16 +39,32 @@ class CacheManager:
             self.cache_root / "VERSION"
         )
 
-        self._write_version()
+        self._ensure_version()
 
     ###########################################################################
     # Version
     ###########################################################################
 
-    def _write_version(self) -> None:
+    def _ensure_version(self) -> None:
 
         if self.version_file.exists():
+            version = self.version_file.read_text(
+                encoding="utf-8",
+            ).strip()
+            if version != CACHE_VERSION:
+                raise RuntimeError(
+                    f"Cache at {self.cache_root} uses format "
+                    f"{version!r}; expected {CACHE_VERSION!r}. "
+                    "Regenerate the cache before training."
+                )
             return
+
+        if any(self.cache_root.glob("*.pkl")):
+            raise RuntimeError(
+                f"Cache at {self.cache_root} contains pickle files but no "
+                "VERSION marker. Its preprocessing format cannot be verified; "
+                "use a new cache directory and regenerate the files."
+            )
 
         self.version_file.write_text(
             CACHE_VERSION,
@@ -193,7 +207,7 @@ class CacheManager:
             exist_ok=True,
         )
 
-        self._write_version()
+        self._ensure_version()
 
     def num_cached(self) -> int:
 

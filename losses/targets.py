@@ -59,6 +59,7 @@ Notes
 from __future__ import annotations
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 
 
 ###############################################################################
@@ -251,14 +252,14 @@ def validate_trajectory_shapes(
     # Numerical validation
     ###########################################################################
 
-    if not torch.isfinite(
+    if FINITE_CHECKS_ENABLED and not torch.isfinite(
         trajectories,
     ).all():
         raise ValueError(
             "trajectories contains NaN or infinite values."
         )
 
-    if not torch.isfinite(
+    if FINITE_CHECKS_ENABLED and not torch.isfinite(
         ground_truth,
     ).all():
         raise ValueError(
@@ -414,7 +415,7 @@ def best_mode_from_endpoint(
     # Numerical validation
     ###########################################################################
 
-    if not torch.isfinite(
+    if FINITE_CHECKS_ENABLED and not torch.isfinite(
         endpoint_error,
     ).all():
         raise RuntimeError(
@@ -439,7 +440,7 @@ def best_mode_from_endpoint(
     # Validate returned tensors
     ###########################################################################
 
-    if not torch.isfinite(
+    if FINITE_CHECKS_ENABLED and not torch.isfinite(
         best_error,
     ).all():
         raise RuntimeError(

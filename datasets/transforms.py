@@ -205,13 +205,17 @@ class Identity(Transform):
 
 def build_train_transform() -> Compose:
     """
-    Default augmentation pipeline.
+    Raw-scene transform for training.
+
+    Rotation and translation are canceled exactly by the target-centered,
+    heading-aligned preprocessing step. Meaningful left/right augmentation
+    is applied to the processed scene by RandomReflectionDataset, which also
+    works when every sample is loaded from cache.
     """
 
     return Compose(
         [
-            RandomRotation(),
-            RandomTranslation(),
+            Identity(),
         ]
     )
 

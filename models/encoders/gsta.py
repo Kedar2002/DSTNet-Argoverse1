@@ -125,6 +125,7 @@ from __future__ import annotations
 from typing import Sequence
 
 import torch
+from utils.numerics import FINITE_CHECKS_ENABLED
 from torch import Tensor, nn
 
 from datasets.scene_graph_builder import SceneGraph
@@ -1568,7 +1569,7 @@ class GSTA(nn.Module):
         # Defensive numerical check.
         ###########################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             output
         ).all():
 
@@ -1714,7 +1715,7 @@ class GSTA(nn.Module):
         # Numerical validation.
         ###########################################################################
 
-        if not torch.isfinite(
+        if FINITE_CHECKS_ENABLED and not torch.isfinite(
             output
         ).all():
 

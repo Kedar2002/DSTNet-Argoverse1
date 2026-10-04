@@ -76,6 +76,7 @@ if str(PROJECT_ROOT) not in sys.path:
 ###############################################################################
 
 from datasets.argoverse_dataset import ArgoverseDataset
+from datasets.augmentation import RandomReflectionDataset
 from datasets.cache_manager import CacheManager
 from datasets.collate import collate_fn
 from datasets.map_loader import MapLoader
@@ -369,12 +370,21 @@ def build_preprocessor() -> ScenePreprocessor:
         )
     )
 
+    frame_rate = float(
+        _optional_attribute(
+            CFG,
+            ("dataset.frame_rate",),
+            10.0,
+        )
+    )
+
     return ScenePreprocessor(
         observation_steps=observation_steps,
         prediction_steps=prediction_steps,
         map_sample_points=map_sample_points,
         spatial_radius=spatial_radius,
         map_radius=map_radius,
+        frame_rate=frame_rate,
     )
 
 
@@ -519,6 +529,100 @@ def build_dataset_roots() -> tuple[Path, Path]:
     )
 
 
+def refinement_enabled_from_config() -> bool:
+    """Resolve whether this configured experiment trains AAR refinement."""
+
+    stage = str(
+        _optional_attribute(
+            CFG,
+            ("training.stage",),
+            "",
+        )
+    ).strip().lower()
+
+    if stage == "refinement":
+        return bool(
+            _optional_attribute(
+                CFG,
+                ("training.refinement.enable_refinement",),
+                True,
+            )
+        )
+
+    if stage == "backbone":
+        return bool(
+            _optional_attribute(
+                CFG,
+                ("training.backbone.enable_refinement",),
+                False,
+            )
+        )
+
+    return bool(
+        _optional_attribute(
+            CFG,
+            ("model.enable_refinement",),
+            False,
+        )
+    )
+
+
+def initialize_refinement_stage(model: DSTNet) -> None:
+    """Load a backbone checkpoint before creating the refinement optimizer."""
+
+    if not refinement_enabled_from_config():
+        return
+
+    should_load = bool(
+        _optional_attribute(
+            CFG,
+            ("training.refinement.load_checkpoint",),
+            False,
+        )
+    )
+    if not should_load:
+        return
+
+    checkpoint_value = _optional_attribute(
+        CFG,
+        ("training.refinement.checkpoint",),
+        "",
+    )
+    checkpoint_path = resolve_path(checkpoint_value)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            "Refinement training is configured to load a backbone checkpoint, "
+            f"but it does not exist: {checkpoint_path}"
+        )
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    elif isinstance(checkpoint, dict) and "model" in checkpoint:
+        state_dict = checkpoint["model"]
+    else:
+        state_dict = checkpoint
+
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    allowed_missing = {
+        name
+        for name in model.state_dict()
+        if name.startswith("refinement.")
+    }
+    invalid_missing = set(incompatible.missing_keys) - allowed_missing
+    if invalid_missing or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "Backbone checkpoint does not match the refinement model. "
+            f"Missing keys: {sorted(invalid_missing)[:10]}; "
+            f"unexpected keys: {incompatible.unexpected_keys[:10]}"
+        )
+
+    print(
+        f"Initialized refinement stage from {checkpoint_path} "
+        f"({len(incompatible.missing_keys)} new refinement tensors)."
+    )
+
+
 ###############################################################################
 # DataLoader
 ###############################################################################
@@ -539,14 +643,24 @@ def build_dataloader(
     framework-validation runs may legitimately pass a ``Subset``.
     """
 
+    if train:
+        dataset = RandomReflectionDataset(dataset)
+
+    loader_kwargs = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": train,
+        "num_workers": num_workers,
+        "collate_fn": collate_fn,
+        "pin_memory": pin_memory,
+        "drop_last": False,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 2
+
     return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=train,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-        pin_memory=pin_memory,
-        drop_last=False,
+        **loader_kwargs,
     )
 
 
@@ -678,6 +792,7 @@ def build_model() -> DSTNet:
         r_max=r_max,
         radius_hidden_dim=radius_hidden_dim,
         dropout=dropout,
+        refinement_enabled=refinement_enabled_from_config(),
     )
 
     return model
@@ -778,6 +893,7 @@ def build_criterion() -> TotalLoss:
         classification_weight=classification_weight,
         score_weight=score_weight,
         refinement_weight=refinement_weight,
+        refinement_enabled=refinement_enabled_from_config(),
     )
 
 
@@ -1136,6 +1252,8 @@ def main() -> None:
     print("=" * 80)
 
     model = build_model()
+
+    initialize_refinement_stage(model)
 
     model.to(
         device
