@@ -1487,20 +1487,13 @@ def load_checkpoint(
 
     checkpoint = torch.load(
         LATEST_CHECKPOINT,
-        map_location=DEVICE,
+        # Keep RNG state tensors on CPU. In particular, CUDA RNG state APIs
+        # require CPU ByteTensors; mapping the whole checkpoint to DEVICE
+        # moves those tensors to CUDA and breaks resume on newer PyTorch.
+        # load_state_dict below copies model and optimizer state to the
+        # appropriate device.
+        map_location="cpu",
     )
-
-    rng_state = checkpoint.get("torch_rng_state")
-    if isinstance(rng_state, torch.Tensor):
-        torch.set_rng_state(rng_state.cpu())
-
-    cuda_rng_states = checkpoint.get("cuda_rng_state_all")
-    if (
-        torch.cuda.is_available()
-        and isinstance(cuda_rng_states, list)
-        and len(cuda_rng_states) == torch.cuda.device_count()
-    ):
-        torch.cuda.set_rng_state_all(cuda_rng_states)
 
     model.load_state_dict(
         checkpoint[
