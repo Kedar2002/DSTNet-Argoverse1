@@ -1238,6 +1238,9 @@ def build_checkpoint_state(
             else None
         ),
 
+        # Persist an automatic FP16 -> FP32 fallback across Kaggle reruns.
+        "amp_enabled": AMP_ENABLED,
+
         "torch_rng_state": (
             torch.get_rng_state()
         ),
@@ -1423,6 +1426,8 @@ def load_checkpoint(
     steps_per_epoch: int = 1,
 ) -> tuple[int, float]:
 
+    global AMP_ENABLED, SCALER_ENABLED
+
     if INIT_CHECKPOINT:
         init_path = Path(INIT_CHECKPOINT)
         if not init_path.is_file():
@@ -1494,6 +1499,16 @@ def load_checkpoint(
         # appropriate device.
         map_location="cpu",
     )
+
+    # Once an epoch has required the FP32 safety fallback, keep later resumed
+    # epochs in FP32 instead of re-triggering the same FP16 overflow.
+    if checkpoint.get("amp_enabled") is False:
+        AMP_ENABLED = False
+        SCALER_ENABLED = False
+        print(
+            "Checkpoint records an FP16 numerical fallback; "
+            "resuming with full FP32 training."
+        )
 
     model.load_state_dict(
         checkpoint[
@@ -1813,6 +1828,8 @@ def train_one_epoch(
     scaler: GradScaler,
 ) -> float:
 
+    global AMP_ENABLED, SCALER_ENABLED
+
     model.train()
 
     running_loss = 0.0
@@ -1822,6 +1839,12 @@ def train_one_epoch(
     consecutive_skipped_amp_updates = 0
     skipped_nonfinite_gradient_updates = 0
     consecutive_nonfinite_gradient_updates = 0
+    skipped_nonfinite_loss_batches = 0
+    consecutive_nonfinite_loss_batches = 0
+    max_consecutive_nonfinite_losses = max(
+        1,
+        int(os.environ.get("DSTNET_MAX_CONSECUTIVE_NONFINITE_LOSSES", "100")),
+    )
     max_consecutive_amp_skips = max(
         1,
         int(os.environ.get("DSTNET_MAX_CONSECUTIVE_AMP_SKIPS", "25")),
@@ -1993,9 +2016,52 @@ def train_one_epoch(
                 f"{loss_value}"
             )
 
-            raise FloatingPointError(
-                "Non-finite loss detected."
-            )
+            metadata = batch.get("metadata", {})
+            sequence_ids = metadata.get("sequence_ids", [])
+            print(f"Scene IDs: {sequence_ids}")
+
+            for tensor_name in (
+                "agent_trajectories",
+                "future_trajectories",
+                "map_centerlines",
+                "positions",
+            ):
+                value = batch.get(tensor_name)
+                if isinstance(value, torch.Tensor):
+                    invalid_count = int((~torch.isfinite(value)).sum().item())
+                    print(
+                        f"{tensor_name}: shape={tuple(value.shape)}, "
+                        f"non-finite values={invalid_count}"
+                    )
+
+            for loss_name, loss_tensor in losses.items():
+                if isinstance(loss_tensor, torch.Tensor) and loss_tensor.numel() == 1:
+                    print(
+                        f"{loss_name}: {loss_tensor.detach().float().item()}"
+                    )
+
+            optimizer.zero_grad(set_to_none=True)
+            skipped_nonfinite_loss_batches += 1
+            consecutive_nonfinite_loss_batches += 1
+
+            if AMP_ENABLED:
+                AMP_ENABLED = False
+                SCALER_ENABLED = False
+                print(
+                    "FP16 produced a non-finite loss. Switching the rest of "
+                    "this run to full FP32; this batch is skipped."
+                )
+
+            if consecutive_nonfinite_loss_batches >= max_consecutive_nonfinite_losses:
+                raise FloatingPointError(
+                    "Too many consecutive batches produced non-finite losses "
+                    f"({consecutive_nonfinite_loss_batches}). Check the scene "
+                    "IDs and input diagnostics above."
+                )
+
+            continue
+
+        consecutive_nonfinite_loss_batches = 0
 
         #######################################################################
         # Backward
@@ -2043,6 +2109,14 @@ def train_one_epoch(
                 scaler.update()
             skipped_nonfinite_gradient_updates += 1
             consecutive_nonfinite_gradient_updates += 1
+            if AMP_ENABLED:
+                AMP_ENABLED = False
+                SCALER_ENABLED = False
+                print(
+                    "FP16 produced non-finite gradients. Switching the rest "
+                    "of this run to full FP32; this batch is skipped.",
+                    flush=True,
+                )
             if consecutive_nonfinite_gradient_updates >= max_consecutive_amp_skips:
                 raise FloatingPointError(
                     "Gradient clipping found a non-finite total norm for "
@@ -2180,6 +2254,13 @@ def train_one_epoch(
         print(
             "Non-finite gradient batches skipped : "
             f"{skipped_nonfinite_gradient_updates:,}",
+            flush=True,
+        )
+
+    if skipped_nonfinite_loss_batches:
+        print(
+            "Non-finite loss batches skipped : "
+            f"{skipped_nonfinite_loss_batches:,}",
             flush=True,
         )
 
